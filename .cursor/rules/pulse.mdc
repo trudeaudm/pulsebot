@@ -1,0 +1,79 @@
+---
+description: Pulse trading engine — architecture, conventions, and hard invariants
+alwaysApply: true
+---
+
+# Pulse — project rules
+
+Pulse is a natural-language trading engine for Base (chain id 8453) and
+Robinhood Chain (chain id 4663, Arbitrum Nitro). Python 3.12, FastAPI backend,
+single-file vanilla-JS dashboard. No build step anywhere.
+
+## Architecture map (read before editing)
+
+- `tradebot/commands.py` — deterministic regex grammar parsing English into
+  `StrategySpec`; optional Claude API fallback. Grammar-first is a design
+  choice: never make the LLM the primary parser.
+- `tradebot/strategies.py` — `Strategy` state machines + `Engine` tick loop.
+  ALL fills route through `Engine._child_order` (paper and live). Rate
+  strategies accrue USD budget per tick and flush child orders when accrual
+  crosses `min_slice_usd`.
+- `tradebot/executor paths` — paper executor simulates fee + size impact and
+  nudges the paper feed; live executor is in `chains.py` (`ChainClient`,
+  Uniswap-v3-style `exactInputSingle`).
+- `tradebot/prices.py` — `PriceBook` (last price + 15s candles) fed by
+  `PaperFeed` (mean-reverting GBM) or `DexscreenerFeed`.
+- `tradebot/portfolio.py` — cash, positions with cost basis, `Trade` ledger,
+  realized/unrealized PnL, stats.
+- `tradebot/server.py` — REST + `/ws` WebSocket pushing a full state snapshot
+  every second. The dashboard is stateless: it renders whatever the snapshot
+  says.
+- `tradebot/static/index.html` — the entire frontend. CSS custom properties
+  drive theming; the chain accent is switched via
+  `document.documentElement.dataset.chain` + `CHAIN_THEME` (Base blue
+  `#0052FF`, Robinhood green `#00C805`, charcoal primaries). Keep this file
+  self-contained: no frameworks, no bundler, lightweight-charts from CDN only.
+
+## Hard invariants — never violate
+
+1. The engine loop must never die: `Engine.run` catches everything; a broken
+   strategy transitions to `status="error"`, others keep running.
+2. Paper/live parity: any new strategy type must work identically in both
+   modes and go through `_child_order`. Never bypass the portfolio ledger.
+3. Secrets: private keys come ONLY from the env var named by
+   `private_key_env`. Never write keys, mnemonics, or API keys to files,
+   logs, config, or code. Never commit `config.yaml`.
+4. Addresses/chain params live in config, never hardcoded in logic
+   (the Base defaults in `config.example.yaml` are the one exception).
+5. Live swaps must always set a slippage-derived `amountOutMinimum`; never 0.
+6. All timestamps are unix seconds (float). All notionals are USD floats.
+7. Strategy IDs (`S1`, `S2`, …) are the join key between engine, portfolio
+   trades, API, and UI. Preserve them across any persistence layer.
+
+## Conventions
+
+- Dataclasses over classes-with-boilerplate; no ORM; stdlib + the deps in
+  `requirements.txt` only. Ask before adding a dependency.
+- Type hints everywhere; `from __future__ import annotations` at module top.
+- API errors return `{"ok": false, "error": "human readable"}` with 4xx.
+- New engine features get a test in `tests/test_pulse.py` following the
+  existing pattern (drive time by rewinding `strategy.last_tick` and calling
+  `eng.tick()` — no sleeps in tests).
+- Frontend: render functions are pure string templates fed by the snapshot;
+  keep the `fmt/fpx/ts` helpers; respect the CSS variable system (`--accent`,
+  `--cardaccent`) rather than hardcoding colors.
+
+## Definition of done for any change
+
+1. `python3 tests/test_pulse.py` passes (add tests for new engine behavior).
+2. If `static/index.html` changed: extract the last <script> block and run
+   `node --check` on it.
+3. Boot check: `python3 -m tradebot config.example.yaml` starts in paper mode
+   with zero warnings, dashboard loads, a command round-trips.
+4. README updated if the command grammar, config schema, or API changed.
+
+## Safety posture
+
+This bot moves real funds in live mode. Bias conservative: fail closed,
+refuse ambiguous parses rather than guessing sizes, cap by default where
+possible, and keep the paper simulator the default experience.

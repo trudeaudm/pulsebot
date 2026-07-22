@@ -1,0 +1,60 @@
+# Pulse configuration.
+# Copy to config.yaml and edit. Paper mode needs nothing else.
+
+bot:
+  mode: paper              # "paper" (simulated) or "live" (signs real transactions)
+  default_chain: base
+  tick_seconds: 1.0        # engine tick
+  min_slice_usd: 10        # smallest child order for rate strategies
+  max_slippage_bps: 100    # live swap slippage tolerance (1%)
+  paper_cash_usd: 10000
+  paper_fee_bps: 30
+  paper_impact_bps_per_1k: 8
+  anthropic_parser: false  # true -> unmatched commands go to Claude API (needs ANTHROPIC_API_KEY)
+  host: 127.0.0.1
+  port: 8420
+  private_key_env: PULSE_PRIVATE_KEY   # env var holding your key in live mode. Never paste keys here.
+  db_path: pulse.db                    # SQLite file for trades / strategies / equity (gitignored)
+
+chains:
+  base:
+    name: Base
+    chain_id: 8453
+    rpc_url: https://mainnet.base.org          # use a dedicated RPC (Alchemy/QuickNode) for real speed
+    explorer: https://basescan.org
+    dexscreener_slug: base                     # enables live price feed even in paper mode if you set addresses
+    # Uniswap v3 on Base:
+    router: "0x2626664c2603336E57B271c5C0b26F421741e481"   # SwapRouter02
+    quoter: "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"   # QuoterV2
+    quote_token: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" # USDC on Base
+    quote_symbol: USDC
+    quote_decimals: 6
+    tokens:
+      - symbol: TOKENA          # rename to your token; add as many as you like
+        address: ""             # ERC-20 address (required for live mode / live prices)
+        decimals: 18
+        pool_fee: 3000          # Uniswap v3 fee tier of the TOKEN/USDC pool
+        dexscreener_pair: ""    # optional: pin a specific pair for the price feed
+        paper_start_price: 0.12
+        paper_volatility: 0.006
+
+  robinhood:
+    name: Robinhood Chain
+    chain_id: 4663
+    rpc_url: https://rpc.mainnet.chain.robinhood.com   # public endpoint is rate-limited; use a provider for speed
+    explorer: https://robinhoodchain.blockscout.com
+    dexscreener_slug: ""        # set when Dexscreener indexes your pair's chain slug
+    # Fill these with the router/quoter of the DEX you trade on Robinhood Chain
+    # (it's Arbitrum Nitro / fully EVM-compatible, so v3-style routers work as-is):
+    router: ""
+    quoter: ""
+    quote_token: ""             # the USD stable you route against on this chain
+    quote_symbol: USDC
+    quote_decimals: 6
+    tokens:
+      - symbol: TOKENB
+        address: ""
+        decimals: 18
+        pool_fee: 3000
+        paper_start_price: 0.42
+        paper_volatility: 0.005

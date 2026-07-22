@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+config.yaml
+.env
+*.db
+*.db-*
+*.sqlite*
+nohup.out
+.DS_Store
