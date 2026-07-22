@@ -65,6 +65,10 @@ grammar can't match is parsed by the Claude API into the same schema.
 4. Set `mode: live` in config.yaml and start. Fills include tx hashes linked
    from the trade tape.
 
+Live fills are reconciled from the swap receipt's ERC-20 `Transfer` logs
+(actual `amountOut`), not the slippage floor. If log decode fails, the fill
+falls back to `amountOutMinimum` and the price is shown with a `~` prefix.
+
 `max_slippage_bps` caps how far a live fill may deviate from the reference
 price; swaps revert instead of filling worse.
 

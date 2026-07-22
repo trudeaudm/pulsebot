@@ -207,6 +207,11 @@ function txCell(t, explorer){
   const href=`${base}/tx/${t.tx_hash}`;
   return `<a class="txlink" href="${href}" target="_blank" rel="noopener">${t.tx_hash.slice(0,10)}…</a>`;
 }
+function pxCell(t){
+  const p=fpx(t.price);
+  if(t.estimated) return `<span title="estimated from slippage floor — log decode failed">~${p}</span>`;
+  return p;
+}
 
 const HINTS = [
   'sell TOKENA at a rate of $300 per minute while the price is above $0.15',
@@ -314,7 +319,7 @@ function render(st){
 
   $('#trades tbody').innerHTML=st.trades.map(t=>`
     <tr><td>${ts(t.ts)}</td><td class="${t.side==='buy'?'pos':'neg'}">${t.side}</td>
-    <td>${t.token}</td><td>$${fmt(t.usd)}</td><td>${fpx(t.price)}</td>
+    <td>${t.token}</td><td>$${fmt(t.usd)}</td><td>${pxCell(t)}</td>
     <td>${fmt(t.slippage_bps,1)}</td><td>${t.strategy_id}</td>
     <td>${txCell(t,(chainsMap[t.chain]||{}).explorer)}</td></tr>`).join('');
 
@@ -404,7 +409,7 @@ async function refreshDetail(){
       <thead><tr><th>time</th><th>side</th><th>usd</th><th>qty</th><th>price</th><th>slip bps</th><th>tx</th></tr></thead>
       <tbody>${d.fills_detail.map(t=>`
         <tr><td>${ts(t.ts)}</td><td class="${t.side==='buy'?'pos':'neg'}">${t.side}</td>
-        <td>$${fmt(t.usd)}</td><td>${fmt(t.qty,2)}</td><td>${fpx(t.price)}</td>
+        <td>$${fmt(t.usd)}</td><td>${fmt(t.qty,2)}</td><td>${pxCell(t)}</td>
         <td>${fmt(t.slippage_bps,1)}</td><td>${txCell(t,d.explorer)}</td></tr>`).join('')
         ||'<tr><td colspan="7" class="empty">no fills yet'+(d.phase==='waiting_trigger'?' — waiting for trigger':'')+'</td></tr>'}
       </tbody></table></div>`;

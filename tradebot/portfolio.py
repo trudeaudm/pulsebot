@@ -19,6 +19,8 @@ class Trade:
     strategy_id: str
     tx_hash: str = ""
     mode: str = "paper"
+    quoted_price: float = 0.0
+    estimated: bool = False
 
     def as_dict(self) -> dict:
         d = self.__dict__.copy()

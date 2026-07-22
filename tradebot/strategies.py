@@ -503,19 +503,23 @@ class Engine:
             res = client.swap(chain_cfg.quote_token, tok.address, amount_in_raw,
                               tok.pool_fee, min_out_raw,
                               out_decimals=tok.decimals,
-                              in_decimals=chain_cfg.quote_decimals)
+                              in_decimals=chain_cfg.quote_decimals,
+                              quoted_out=expected_out)
             qty, px = res.amount_out, usd / res.amount_out
         else:
             qty = usd / ref_price
             amount_in_raw = int(qty * 10 ** tok.decimals)
+            expected_out = usd
             min_out_raw = int(usd * (1 - slip) * 10 ** chain_cfg.quote_decimals)
             res = client.swap(tok.address, chain_cfg.quote_token, amount_in_raw,
                               tok.pool_fee, min_out_raw,
                               out_decimals=chain_cfg.quote_decimals,
-                              in_decimals=tok.decimals)
+                              in_decimals=tok.decimals,
+                              quoted_out=expected_out)
             px = res.amount_out / qty if qty else ref_price
             usd = res.amount_out
         return Trade(ts=time.time(), chain=s.chain, token=spec.token,
                      side=spec.side, usd=usd, qty=qty, price=px,
                      ref_price=ref_price, strategy_id=s.id,
-                     tx_hash=res.tx_hash, mode="live")
+                     tx_hash=res.tx_hash, mode="live",
+                     quoted_price=ref_price, estimated=res.estimated)

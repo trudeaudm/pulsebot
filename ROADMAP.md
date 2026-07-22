@@ -12,7 +12,7 @@ Each item should land with tests and a README update per `.cursor/rules/pulse.md
    max daily spend, per-strategy default cap when none given.
 
 ## P2 — execution quality
-4. **Live fill reconciliation** — decode actual `amountOut` from swap receipt
+4. **Live fill reconciliation** (done) — decode actual `amountOut` from swap receipt
    logs instead of using the slippage floor; record realized vs quoted.
 5. **On-chain quoter pricing** — in live mode, mark prices from QuoterV2
    alongside Dexscreener; use the more recent of the two.

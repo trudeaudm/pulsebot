@@ -9,8 +9,8 @@ Robinhood Chain entry at whichever DEX deployment you trade on there.
 """
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
+from typing import Any
 
 from web3 import Web3
 
@@ -58,6 +58,66 @@ QUOTER_V2_ABI = [
                   {"name": "gasEstimate", "type": "uint256"}]},
 ]
 
+# ERC-20 Transfer(address,address,uint256)
+TRANSFER_TOPIC0 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+
+def _as_hex(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "hex") and not isinstance(value, str):
+        h = value.hex()
+        return h if h.startswith("0x") else "0x" + h
+    s = str(value)
+    return s if s.startswith("0x") else "0x" + s
+
+
+def _norm_addr(addr: str) -> str:
+    a = addr.lower()
+    if not a.startswith("0x"):
+        a = "0x" + a
+    return a
+
+
+def _addr_from_topic(topic: Any) -> str:
+    """Decode a 32-byte-padded address topic to 0x + 40 hex chars."""
+    h = _as_hex(topic).lower().removeprefix("0x")
+    return "0x" + h[-40:]
+
+
+def decode_transfer_amount(logs: list, token_address: str, recipient: str) -> int | None:
+    """Sum Transfer amounts of token_address to recipient from receipt logs.
+
+    Returns None when no matching Transfer is found.
+    """
+    want_token = _norm_addr(token_address)
+    want_to = _norm_addr(recipient)
+    total = 0
+    matched = False
+    for log in logs:
+        if isinstance(log, dict):
+            address = log.get("address", "")
+            topics = log.get("topics") or []
+            data = log.get("data", "0x")
+        else:
+            address = log["address"]
+            topics = list(log["topics"])
+            data = log["data"]
+        if len(topics) < 3:
+            continue
+        if _as_hex(topics[0]).lower() != TRANSFER_TOPIC0:
+            continue
+        if _norm_addr(str(address)) != want_token:
+            continue
+        if _addr_from_topic(topics[2]) != want_to:
+            continue
+        raw = _as_hex(data).removeprefix("0x")
+        if not raw:
+            continue
+        total += int(raw, 16)
+        matched = True
+    return total if matched else None
+
 
 @dataclass
 class SwapResult:
@@ -65,6 +125,11 @@ class SwapResult:
     amount_in: float
     amount_out: float
     price: float
+    quoted_out: float = 0.0
+    min_out: float = 0.0
+    actual_out: float = 0.0
+    estimated: bool = False
+    gas_used: int = 0
 
 
 class ChainClient:
@@ -126,18 +191,19 @@ class ChainClient:
             "chainId": self.chain_id,
         }
 
-    def _send(self, tx: dict) -> str:
+    def _send(self, tx: dict):
+        """Sign, broadcast, wait for receipt. Returns the receipt on success."""
         tx.setdefault("gas", int(self.w3.eth.estimate_gas(tx) * 1.25))
         signed = self.account.sign_transaction(tx)
         h = self.w3.eth.send_raw_transaction(signed.raw_transaction)
         receipt = self.w3.eth.wait_for_transaction_receipt(h, timeout=120)
-        if receipt.status != 1:
-            raise RuntimeError(f"tx reverted: {h.hex()}")
-        return h.hex()
+        if receipt["status"] != 1:
+            raise RuntimeError(f"tx reverted: {_as_hex(h)}")
+        return receipt
 
     def swap(self, token_in: str, token_out: str, amount_in_raw: int,
              fee: int, min_out_raw: int, out_decimals: int,
-             in_decimals: int) -> SwapResult:
+             in_decimals: int, quoted_out: float = 0.0) -> SwapResult:
         """exactInputSingle swap. Caller computes min_out from quote + slippage."""
         if not (self.account and self.router):
             raise RuntimeError(f"{self.name}: live trading not configured "
@@ -149,10 +215,18 @@ class ChainClient:
             token_in, token_out, fee, self.account.address,
             amount_in_raw, min_out_raw, 0))
         tx = fn.build_transaction(self._tx_fields())
-        h = self._send(tx)
-        # read out amount from balance delta is racy; use quoted min as floor
+        receipt = self._send(tx)
+        tx_hash = _as_hex(receipt.get("transactionHash", b""))
         amount_in = amount_in_raw / 10 ** in_decimals
-        amount_out = min_out_raw / 10 ** out_decimals
+        min_out = min_out_raw / 10 ** out_decimals
+        actual_raw = decode_transfer_amount(
+            list(receipt.get("logs") or []), token_out, self.account.address)
+        estimated = actual_raw is None
+        amount_out = min_out if estimated else actual_raw / 10 ** out_decimals
+        gas_used = int(receipt.get("gasUsed") or 0)
         px = (amount_in / amount_out) if amount_out else 0.0
-        return SwapResult(tx_hash=h, amount_in=amount_in,
-                          amount_out=amount_out, price=px)
+        return SwapResult(
+            tx_hash=tx_hash, amount_in=amount_in, amount_out=amount_out, price=px,
+            quoted_out=quoted_out, min_out=min_out, actual_out=amount_out,
+            estimated=estimated, gas_used=gas_used,
+        )

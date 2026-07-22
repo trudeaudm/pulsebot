@@ -361,6 +361,51 @@ def test_protective_exits_bypass_daily_spend():
     assert pf.qty("base", "TOKENA") < qty_before - 1e-9
 
 
+def _transfer_log(token: str, to_addr: str, amount: int, frm: str = "0x" + "11" * 20):
+    """Synthetic ERC-20 Transfer log dict (no web3 types)."""
+    topic0 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+    pad = lambda a: "0x" + a.lower().removeprefix("0x").rjust(64, "0")
+    return {
+        "address": token,
+        "topics": [topic0, pad(frm), pad(to_addr)],
+        "data": hex(amount),
+    }
+
+
+def test_decode_transfer_amount():
+    from tradebot.chains import decode_transfer_amount
+
+    token = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"  # checksummed USDC-like
+    recipient = "0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B"
+    other = "0x00000000000000000000000000000000000000aa"
+
+    # (a) single matching transfer
+    logs = [_transfer_log(token, recipient, 1_500_000)]
+    assert decode_transfer_amount(logs, token, recipient) == 1_500_000
+
+    # (b) multiple transfers — only matching token+recipient summed
+    logs = [
+        _transfer_log(token, other, 999),
+        _transfer_log(token, recipient, 100),
+        _transfer_log("0x" + "22" * 20, recipient, 777),
+        _transfer_log(token, recipient, 50),
+    ]
+    assert decode_transfer_amount(logs, token, recipient) == 150
+
+    # (c) no match
+    assert decode_transfer_amount(
+        [_transfer_log(token, other, 1)], token, recipient) is None
+    assert decode_transfer_amount([], token, recipient) is None
+
+    # (d) lowercase vs checksummed address forms
+    assert decode_transfer_amount(
+        [_transfer_log(token.lower(), recipient.lower(), 42)],
+        token, recipient) == 42
+    assert decode_transfer_amount(
+        [_transfer_log(token, recipient, 42)],
+        token.lower(), recipient.lower()) == 42
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
