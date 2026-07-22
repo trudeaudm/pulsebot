@@ -330,6 +330,37 @@ def test_risk_blocked_rate_no_accrual_burst():
     assert s.status == "active"
 
 
+def test_protective_exits_bypass_daily_spend():
+    """Stops and sell-all still fire when the daily spend cap is exhausted."""
+    eng, book, pf = _engine()
+    book.update("base", "TOKENA", 0.10)
+    # Build inventory first, then tighten the daily cap so it's already exhausted.
+    eng.submit(parse_command("buy $80 of TOKENA"))
+    eng.tick()
+    assert pf.qty("base", "TOKENA") > 0
+    qty_before = pf.qty("base", "TOKENA")
+    eng.cfg.risk = RiskConfig(max_daily_spend_usd=50)  # already spent ~$80
+
+    # Plain rate-sell remains blocked by the daily cap.
+    rate_sell = eng.submit(parse_command(
+        "sell TokenA at a rate of $60 per minute while the price is above $0.05 "
+        "until a total of $50"))
+    for _ in range(30):
+        rate_sell.last_tick -= 1
+        eng.tick()
+    assert rate_sell.fills == 0
+    assert rate_sell.blocked_reason and "daily spend" in rate_sell.blocked_reason
+
+    # Stop still fires its protective sell.
+    stop = eng.submit(parse_command(
+        "sell all TokenA if the price drops below $0.12"))
+    book.update("base", "TOKENA", 0.09)
+    eng.tick()
+    assert stop.status == "done"
+    assert stop.fills == 1
+    assert pf.qty("base", "TOKENA") < qty_before - 1e-9
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

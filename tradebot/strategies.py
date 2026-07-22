@@ -423,10 +423,14 @@ class Engine:
                 return (f"open notional cap "
                         f"${risk.max_open_notional_usd_per_token:g} for {s.spec.token}")
         if risk.max_daily_spend_usd > 0:
-            cutoff = time.time() - 86_400
-            spent_24h = sum(t.usd for t in self.portfolio.trades if t.ts >= cutoff)
-            if spent_24h + usd > risk.max_daily_spend_usd + 1e-9:
-                return f"daily spend cap ${risk.max_daily_spend_usd:g}"
+            # Protective exits reduce exposure — never block them with the daily cap.
+            protective = (s.spec.kind == "stop"
+                          or (s.spec.side == "sell" and s.spec.sell_all))
+            if not protective:
+                cutoff = time.time() - 86_400
+                spent_24h = sum(t.usd for t in self.portfolio.trades if t.ts >= cutoff)
+                if spent_24h + usd > risk.max_daily_spend_usd + 1e-9:
+                    return f"daily spend cap ${risk.max_daily_spend_usd:g}"
         return None
 
     def _note_blocked(self, s: Strategy, reason: str) -> None:
