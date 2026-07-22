@@ -40,6 +40,19 @@ def test_market_stop_misc():
     assert s.kind == "stop" and s.trigger.op == "below"
 
 
+def test_trailing_stop_parse():
+    s = parse_command("sell all TOKENA if the price falls 10% from its high")
+    assert s.kind == "trailing_stop" and s.sell_all and s.trail_pct == 10
+    assert "10%" in s.describe() and "peak" in s.describe()
+    s = parse_command("trailing stop 10% on TOKENA")
+    assert s.kind == "trailing_stop" and s.sell_all and s.token == "TOKENA"
+    s = parse_command("sell $500 of TOKENA with a trailing stop of 8%")
+    assert s.kind == "trailing_stop" and abs(s.usd_amount - 500) < 1e-9 and s.trail_pct == 8
+    assert not s.sell_all
+    s = parse_command("trailing stop 12% on TOKENA on robinhood")
+    assert s.chain == "robinhood" and s.trail_pct == 12 and s.token == "TOKENA"
+
+
 def _engine():
     cfg = BotConfig(chains={"base": ChainConfig(
         name="Base", chain_id=8453, rpc_url="",
@@ -404,6 +417,74 @@ def test_decode_transfer_amount():
     assert decode_transfer_amount(
         [_transfer_log(token, recipient, 42)],
         token.lower(), recipient.lower()) == 42
+
+
+def test_trailing_stop_engine_and_persist(tmp_path=None):
+    import tempfile
+    from pathlib import Path
+    root = Path(tmp_path) if tmp_path else Path(tempfile.mkdtemp())
+    db = root / "trail.db"
+
+    # (a) peak ratchets up and never down; (c) shallow dip does not fire
+    eng, book, pf = _engine()
+    book.update("base", "TOKENA", 0.10)
+    eng.submit(parse_command("buy $500 of TOKENA"))
+    eng.tick()
+    trail = eng.submit(parse_command("trailing stop 10% on TOKENA"))
+    eng.tick()
+    assert abs(trail.peak_price - 0.10) < 1e-12
+    book.update("base", "TOKENA", 0.12)
+    eng.tick()
+    assert abs(trail.peak_price - 0.12) < 1e-12
+    book.update("base", "TOKENA", 0.11)
+    eng.tick()
+    assert abs(trail.peak_price - 0.12) < 1e-12
+    book.update("base", "TOKENA", 0.109)  # trigger at 0.108
+    eng.tick()
+    assert trail.status == "active" and trail.fills == 0
+
+    # (b) fires at threshold and sells full position for sell_all
+    book.update("base", "TOKENA", 0.20)
+    eng.tick()
+    assert abs(trail.peak_price - 0.20) < 1e-12
+    book.update("base", "TOKENA", 0.20 * 0.9)
+    eng.tick()
+    assert trail.status == "done" and trail.fills == 1
+    assert pf.qty("base", "TOKENA") < 1e-9
+
+    # (d) peak persists through store round-trip and does not reset
+    eng, book, pf, store = _engine_with_store(db)
+    book.update("base", "TOKENA", 0.10)
+    eng.submit(parse_command("buy $200 of TOKENA"))
+    eng.tick()
+    trail = eng.submit(parse_command("trailing stop 10% on TOKENA"))
+    book.update("base", "TOKENA", 0.14)
+    eng.tick()
+    assert abs(trail.peak_price - 0.14) < 1e-12
+    sid, peak = trail.id, trail.peak_price
+    store.close()
+
+    eng2, book2, pf2, store2 = _engine_with_store(db)
+    book2.update("base", "TOKENA", 0.13)  # below prior peak, above trigger 0.126
+    r = eng2.find(sid)
+    assert r is not None and abs(r.peak_price - peak) < 1e-12
+    eng2.tick()
+    assert abs(r.peak_price - peak) < 1e-12  # did not reset to 0.13
+    store2.close()
+
+    # (e) trailing stop fires even when daily spend cap is exhausted
+    eng, book, pf = _engine()
+    book.update("base", "TOKENA", 0.10)
+    eng.submit(parse_command("buy $80 of TOKENA"))
+    eng.tick()
+    eng.cfg.risk = RiskConfig(max_daily_spend_usd=50)
+    trail = eng.submit(parse_command("trailing stop 10% on TOKENA"))
+    book.update("base", "TOKENA", 0.15)
+    eng.tick()
+    book.update("base", "TOKENA", 0.15 * 0.9)
+    eng.tick()
+    assert trail.status == "done" and trail.fills == 1
+    assert pf.qty("base", "TOKENA") < 1e-9
 
 
 if __name__ == "__main__":

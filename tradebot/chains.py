@@ -221,8 +221,13 @@ class ChainClient:
         min_out = min_out_raw / 10 ** out_decimals
         actual_raw = decode_transfer_amount(
             list(receipt.get("logs") or []), token_out, self.account.address)
-        estimated = actual_raw is None
-        amount_out = min_out if estimated else actual_raw / 10 ** out_decimals
+        # Router reverts below amountOutMinimum — a lower decode means wrong log.
+        if actual_raw is None or actual_raw < min_out_raw:
+            estimated = True
+            amount_out = min_out
+        else:
+            estimated = False
+            amount_out = actual_raw / 10 ** out_decimals
         gas_used = int(receipt.get("gasUsed") or 0)
         px = (amount_in / amount_out) if amount_out else 0.0
         return SwapResult(

@@ -52,6 +52,7 @@ class Strategy:
     last_tick: float = field(default_factory=time.time)
     error: str = ""
     blocked_reason: str = ""
+    peak_price: float = 0.0       # trailing stop: highest price seen
     _last_block_log: float = 0.0  # rate-limit blocked log lines (not persisted)
 
     # ---- per-strategy analytics -------------------------------------
@@ -75,9 +76,21 @@ class Strategy:
         mins = (self.last_fill - self.first_fill) / 60.0
         return self.spent_usd / mins if mins > 0 else 0.0
 
+    def trail_trigger(self) -> float | None:
+        if self.spec.kind != "trailing_stop" or self.peak_price <= 0:
+            return None
+        return self.peak_price * (1.0 - self.spec.trail_pct / 100.0)
+
+    def trail_distance_pct(self, price: float | None) -> float | None:
+        """How far price is above the trigger, as % of peak. 0 = at trigger."""
+        trig = self.trail_trigger()
+        if trig is None or price is None or self.peak_price <= 0:
+            return None
+        return (price - trig) / self.peak_price * 100.0
+
     def as_dict(self, price: float | None) -> dict:
         cap = self.spec.total_cap_usd or 0
-        return {
+        d = {
             "id": self.id,
             "text": self.spec.describe(),
             "raw": self.spec.raw_text,
@@ -102,7 +115,12 @@ class Strategy:
             "error": self.error,
             "blocked_reason": self.blocked_reason,
             "notes": list(self.spec.notes),
+            "trail_pct": self.spec.trail_pct if self.spec.kind == "trailing_stop" else None,
+            "peak_price": self.peak_price if self.spec.kind == "trailing_stop" else None,
+            "trail_trigger": self.trail_trigger(),
+            "trail_distance_pct": self.trail_distance_pct(price),
         }
+        return d
 
 
 class Engine:
@@ -187,6 +205,9 @@ class Engine:
                 error=row["error"] or "",
                 blocked_reason=(row["blocked_reason"] if "blocked_reason" in row.keys()
                                 else "") or "",
+                peak_price=float(row["peak_price"]) if (
+                    "peak_price" in row.keys() and row["peak_price"] is not None
+                ) else 0.0,
             )
             if s.status in ("active", "waiting"):
                 if live:
@@ -246,6 +267,9 @@ class Engine:
             s.status = "waiting"
         elif spec.kind == "rate":
             s.phase = "streaming"
+        elif spec.kind == "trailing_stop":
+            s.status = "active"
+            s.peak_price = 0.0  # set on first observed tick price
         self.strategies.append(s)
         self._persist_strategy(s)
         self.log(f"{s.id} accepted: {spec.describe()}")
@@ -335,9 +359,10 @@ class Engine:
             if price is None:
                 continue
             try:
-                prev_status, prev_phase = s.status, s.phase
+                prev_status, prev_phase, prev_peak = s.status, s.phase, s.peak_price
                 self._tick_strategy(s, price, dt)
-                if s.status != prev_status or s.phase != prev_phase:
+                if (s.status != prev_status or s.phase != prev_phase
+                        or s.peak_price != prev_peak):
                     self._persist_strategy(s)
             except Exception as e:
                 s.status = "error"
@@ -364,6 +389,19 @@ class Engine:
                 if self._fill_market(s, price):
                     s.status = "done"
                     self.log(f"{s.id} stop fired at ${price:.6f}")
+            return
+
+        if spec.kind == "trailing_stop":
+            if s.peak_price <= 0:
+                s.peak_price = price
+            else:
+                s.peak_price = max(s.peak_price, price)
+            trig = s.peak_price * (1.0 - spec.trail_pct / 100.0)
+            if price <= trig + 1e-12:
+                if self._fill_market(s, price):
+                    s.status = "done"
+                    self.log(f"{s.id} trailing stop fired at ${price:.6f} "
+                             f"(peak ${s.peak_price:.6f})")
             return
 
         if spec.kind == "triggered_rate" and s.phase == "waiting_trigger":
@@ -424,7 +462,7 @@ class Engine:
                         f"${risk.max_open_notional_usd_per_token:g} for {s.spec.token}")
         if risk.max_daily_spend_usd > 0:
             # Protective exits reduce exposure — never block them with the daily cap.
-            protective = (s.spec.kind == "stop"
+            protective = (s.spec.kind in ("stop", "trailing_stop")
                           or (s.spec.side == "sell" and s.spec.sell_all))
             if not protective:
                 cutoff = time.time() - 86_400

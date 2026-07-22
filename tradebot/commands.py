@@ -41,7 +41,7 @@ class Condition:
 
 @dataclass
 class StrategySpec:
-    kind: str                     # market | rate | triggered_rate | limit | stop | cancel | pause | resume
+    kind: str                     # market | rate | triggered_rate | limit | stop | trailing_stop | cancel | pause | resume
     side: str = "buy"             # buy | sell
     token: str = ""
     chain: str = ""               # empty -> default chain
@@ -53,6 +53,7 @@ class StrategySpec:
     trigger: Optional[Condition] = None   # fires once, starts the strategy
     condition: Optional[Condition] = None # must hold for rate execution to run
     limit_price: Optional[float] = None
+    trail_pct: float = 0.0        # trailing stop drawdown percent from peak
     raw_text: str = ""
     notes: list[str] = field(default_factory=list)
 
@@ -74,6 +75,14 @@ class StrategySpec:
         elif self.kind == "stop":
             tgt = f"${self.usd_amount:g} of" if self.usd_amount else "all"
             bits = [f"stop: sell {tgt} {self.token} if {self.trigger.describe()}"]
+        elif self.kind == "trailing_stop":
+            if self.sell_all:
+                tgt = f"all {self.token}"
+            elif self.token_amount is not None:
+                tgt = f"{self.token_amount:g} {self.token}"
+            else:
+                tgt = f"${self.usd_amount:g} of {self.token}"
+            bits = [f"trailing stop: sell {tgt} {self.trail_pct:g}% below peak"]
         elif self.kind == "rate":
             bits = [f"{self.side} {self.token} @ ${self.rate_usd_per_min:g}/min"]
             if self.condition:
@@ -123,11 +132,24 @@ RE_PAUSE = re.compile(r"^\s*pause\b", re.I)
 RE_RESUME = re.compile(r"^\s*(resume|unpause|continue)\b\s*$", re.I)
 RE_SELL_ALL = re.compile(r"\bsell\s+all\s+(?:my\s+|of\s+my\s+)?([A-Za-z][A-Za-z0-9_\-]{1,15})", re.I)
 RE_ON_CHAIN = re.compile(r"\bon\s+(base|robinhood(?:\s*chain)?)\b", re.I)
+RE_TRAILING_STOP = re.compile(
+    rf"trailing\s+stop\s+(?:of\s+)?{NUM}\s*%",
+    re.I,
+)
+RE_FALLS_FROM_HIGH = re.compile(
+    rf"(?:falls?|drops?|declines?)\s+{NUM}\s*%\s+from\s+(?:its\s+)?(?:high|peak|ath)",
+    re.I,
+)
+RE_ON_TOKEN = re.compile(
+    r"\bon\s+([A-Za-z][A-Za-z0-9_\-]{1,15})\b",
+    re.I,
+)
 
 _STOPWORDS = {
     "THE", "A", "AN", "OF", "AT", "IF", "WHILE", "WHEN", "PRICE", "ALL", "MY",
     "IT", "NOW", "TOTAL", "RATE", "PER", "MINUTE", "HOUR", "SECOND", "USD",
-    "DOLLARS", "WORTH", "UNTIL", "ONCE", "TO",
+    "DOLLARS", "WORTH", "UNTIL", "ONCE", "TO", "BASE", "ROBINHOOD", "CHAIN",
+    "TRAILING", "STOP", "FROM", "ITS", "HIGH", "PEAK", "WITH",
 }
 
 
@@ -160,6 +182,11 @@ def _find_token(text: str) -> str:
     m = RE_SIDE_TOKEN.search(text)
     if m and m.group(3) and m.group(3).upper() not in _STOPWORDS:
         return m.group(3).upper()
+    # "trailing stop … on TOKEN"
+    for m in RE_ON_TOKEN.finditer(text):
+        cand = m.group(1).upper()
+        if cand not in _STOPWORDS:
+            return cand
     # last resort: any TitleCase/UPPER symbol-looking word
     for w in re.findall(r"\b[A-Z][A-Za-z0-9]{1,14}\b", text):
         if w.upper() not in _STOPWORDS:
@@ -244,6 +271,21 @@ def parse_command(text: str) -> StrategySpec:
 
     if not token and not sell_all:
         raise ParseError("couldn't work out which token you mean")
+
+    # -------- trailing stop (before other classify so "% from high" wins)
+    trail_m = RE_TRAILING_STOP.search(t) or RE_FALLS_FROM_HIGH.search(t)
+    if trail_m:
+        trail_pct = _f(trail_m.group(1))
+        if trail_pct <= 0 or trail_pct >= 100:
+            raise ParseError("trailing stop percent must be between 0 and 100")
+        sa = sell_all
+        if not sa and not usd and token_amount is None:
+            sa = True  # default size: sell all
+        return StrategySpec(
+            kind="trailing_stop", side="sell", token=token, chain=chain,
+            usd_amount=usd, token_amount=token_amount, sell_all=sa,
+            trail_pct=trail_pct, raw_text=text,
+        )
 
     # -------- classify
     if trigger and rate:

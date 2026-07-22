@@ -301,6 +301,16 @@ function render(st){
     const pnlCls=x.pnl>=0?'pos':'neg';
     const badge=x.paused?'<span class="badge pausedb">paused</span>'
       :`<span class="badge ${x.status}">${x.status}${x.phase==='waiting_trigger'?' · armed':''}</span>`;
+    const trailing=x.kind==='trailing_stop' && x.status!=='done';
+    const nums=trailing?`
+        <div><span class="k">peak</span>${x.peak_price?fpx(x.peak_price):'—'}</div>
+        <div><span class="k">trigger</span>${x.trail_trigger?fpx(x.trail_trigger):'—'}</div>
+        <div><span class="k">distance</span>${x.trail_distance_pct==null?'—':fmt(x.trail_distance_pct,1)+'%'}</div>
+        <div><span class="k">trail</span>${x.trail_pct!=null?fmt(x.trail_pct,0)+'%':''}</div>`:`
+        <div><span class="k">filled</span>$${fmt(x.spent_usd,0)}${x.cap_usd?'<span style="color:var(--dim)">/'+fmt(x.cap_usd,0)+'</span>':''}</div>
+        <div><span class="k">fills</span>${x.fills}</div>
+        <div><span class="k">vwap</span>${x.fills?fpx(x.vwap):'—'}</div>
+        <div><span class="k">pnl</span><span class="${pnlCls}">${x.fills?(x.pnl>=0?'+':'')+fmt(x.pnl):'—'}</span></div>`;
     return `
     <div class="card st-${x.status}" style="--cardaccent:${chainColor(x.chain)}" onclick="openDetail('${x.id}')">
       <div class="head"><span class="sid">${x.id}</span>
@@ -309,11 +319,7 @@ function render(st){
       <div class="desc" title="${x.raw.replace(/"/g,'&quot;')}">${x.text}</div>
       ${x.blocked_reason?`<div class="blocked">${x.blocked_reason}</div>`:''}
       ${x.progress!=null?`<div class="bar"><i style="width:${Math.min(100,x.progress*100)}%"></i></div>`:''}
-      <div class="nums">
-        <div><span class="k">filled</span>$${fmt(x.spent_usd,0)}${x.cap_usd?'<span style="color:var(--dim)">/'+fmt(x.cap_usd,0)+'</span>':''}</div>
-        <div><span class="k">fills</span>${x.fills}</div>
-        <div><span class="k">vwap</span>${x.fills?fpx(x.vwap):'—'}</div>
-        <div><span class="k">pnl</span><span class="${pnlCls}">${x.fills?(x.pnl>=0?'+':'')+fmt(x.pnl):'—'}</span></div>
+      <div class="nums">${nums}
       </div>
     </div>`}).join('');
 
@@ -378,7 +384,14 @@ async function refreshDetail(){
     d.trigger?`trigger: ${d.trigger}`:null,
     d.condition?`gate: ${d.condition} <span class="${d.gate_open?'pos':'neg'}">(${d.gate_open==null?'—':d.gate_open?'open':'closed'})</span>`:null,
     d.limit_price?`limit: $${fpx(d.limit_price)}`:null,
+    d.kind==='trailing_stop'&&d.trail_pct!=null?`trail: ${fmt(d.trail_pct,0)}% below peak`:null,
   ].filter(Boolean).join(' &nbsp;·&nbsp; ');
+
+  const trailStats=d.kind==='trailing_stop'?`
+      ${dcell('Peak',d.peak_price?fpx(d.peak_price):'—')}
+      ${dcell('Trigger',d.trail_trigger?fpx(d.trail_trigger):'—')}
+      ${dcell('Distance',d.trail_distance_pct==null?'—':fmt(d.trail_distance_pct,1)+'%')}
+      ${dcell('Trail',d.trail_pct!=null?fmt(d.trail_pct,0)+'%':'—')}`:'';
 
   $('#detail').innerHTML=`
     <div class="dhead"><span class="sid">${d.id}</span>
@@ -401,6 +414,7 @@ async function refreshDetail(){
       ${dcell('Avg slippage',fmt(d.avg_slippage_bps,1)+' bps')}
       ${dcell('Rate',d.rate_target?fmt(d.rate_actual,0)+' <span style="color:var(--dim);font-size:12px">/ '+fmt(d.rate_target,0)+' $/min</span>':'—')}
       ${dcell('Age',dur(d.elapsed_s))}
+      ${trailStats}
     </div>
     <div class="dsection">Cumulative filled (USD)</div>
     <div id="dchart"></div>
@@ -411,7 +425,7 @@ async function refreshDetail(){
         <tr><td>${ts(t.ts)}</td><td class="${t.side==='buy'?'pos':'neg'}">${t.side}</td>
         <td>$${fmt(t.usd)}</td><td>${fmt(t.qty,2)}</td><td>${pxCell(t)}</td>
         <td>${fmt(t.slippage_bps,1)}</td><td>${txCell(t,d.explorer)}</td></tr>`).join('')
-        ||'<tr><td colspan="7" class="empty">no fills yet'+(d.phase==='waiting_trigger'?' — waiting for trigger':'')+'</td></tr>'}
+        ||'<tr><td colspan="7" class="empty">no fills yet'+(d.phase==='waiting_trigger'?' — waiting for trigger':d.kind==='trailing_stop'?' — trailing':'')+'</td></tr>'}
       </tbody></table></div>`;
 
   if(dChart){dChart.remove();dChart=null;}

@@ -38,6 +38,8 @@ you can rehearse trigger/rate strategies realistically before risking anything.
 | `sell all TOKENA` | close position |
 | `buy $500 of TOKENA at $0.09` | limit order |
 | `sell all TOKENA if the price drops below $0.08` | stop |
+| `sell all TOKENA if the price falls 10% from its high` | trailing stop |
+| `trailing stop 10% on TOKENA` | trailing stop (sell all) |
 | `stop loss at $0.09 for $500 of TOKENA` | partial stop |
 | `sell TOKENA at a rate of $300 per minute while the price is above $0.15` | gated rate stream (TWAP) |
 | `buy $450 of TOKENA if the price goes below $0.1 … $100 per minute … total of $1200` | trigger + DCA with cap |
