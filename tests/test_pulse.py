@@ -487,6 +487,129 @@ def test_trailing_stop_engine_and_persist(tmp_path=None):
     assert pf.qty("base", "TOKENA") < 1e-9
 
 
+def test_grid_parse():
+    s = parse_command(
+        "grid TOKENA between $0.08 and $0.14 with 7 levels, $50 per level")
+    assert s.kind == "grid" and s.token == "TOKENA"
+    assert s.grid_lower == 0.08 and s.grid_upper == 0.14
+    assert s.grid_levels == 7 and s.usd_per_level == 50
+    assert "7 levels" in s.describe()
+    s = parse_command("grid TOKENA from $0.08 to $0.14, 7 levels, $50 each")
+    assert s.kind == "grid" and s.usd_per_level == 50
+    s = parse_command(
+        "grid TOKENA between $0.08 and $0.14, 5 levels, $100 per level on robinhood")
+    assert s.chain == "robinhood" and s.grid_levels == 5
+    try:
+        parse_command("grid TOKENA between $0.14 and $0.08 with 3 levels, $10 per level")
+        assert False, "expected ParseError"
+    except Exception as e:
+        assert "upper" in str(e).lower() or "greater" in str(e).lower()
+
+
+def test_grid_engine(tmp_path=None):
+    import tempfile
+    from pathlib import Path
+    root = Path(tmp_path) if tmp_path else Path(tempfile.mkdtemp())
+    db = root / "grid.db"
+
+    # 3 levels: 0.10, 0.12, 0.14
+    eng, book, pf = _engine()
+    eng.cfg.min_slice_usd = 5
+    book.update("base", "TOKENA", 0.15)
+    g = eng.submit(parse_command(
+        "grid TOKENA between $0.10 and $0.14 with 3 levels, $50 per level"))
+    eng.tick()  # anchor at 0.15
+    assert g.prev_price == 0.15 and len(g.grid_lots) == 0
+
+    # (a) downward sweep buys 3 lots, no duplicates on further ticks below
+    book.update("base", "TOKENA", 0.10)  # still in-band; crosses 0.14, 0.12, 0.10
+    eng.tick()
+    assert len(g.grid_lots) == 3
+    assert set(g.grid_lots) == {0, 1, 2}
+    buys = sum(1 for t in pf.trades if t.side == "buy" and t.strategy_id == g.id)
+    assert buys == 3
+    book.update("base", "TOKENA", 0.08)  # outside band — no new buys
+    eng.tick()
+    assert len(g.grid_lots) == 3
+    buys2 = sum(1 for t in pf.trades if t.side == "buy" and t.strategy_id == g.id)
+    assert buys2 == 3
+
+    # (c) price wandering outside the band does nothing after exiting
+    book.update("base", "TOKENA", 0.20)
+    eng.tick()  # upward sells lots when crossing levels
+    assert len(g.grid_lots) == 0
+    fills_at = g.fills
+    book.update("base", "TOKENA", 0.25)
+    eng.tick()
+    book.update("base", "TOKENA", 0.22)
+    eng.tick()
+    assert g.fills == fills_at
+
+    # (b) oscillation across one level pair — positive realized PnL
+    eng, book, pf = _engine()
+    eng.cfg.min_slice_usd = 5
+    book.update("base", "TOKENA", 0.13)
+    g = eng.submit(parse_command(
+        "grid TOKENA between $0.10 and $0.14 with 3 levels, $50 per level"))
+    eng.tick()
+    # buy L1 (0.12) by crossing down through it
+    book.update("base", "TOKENA", 0.115)
+    eng.tick()
+    assert 1 in g.grid_lots
+    # sell by crossing L2 (0.14) upward
+    book.update("base", "TOKENA", 0.145)
+    eng.tick()
+    assert 1 not in g.grid_lots
+    # repeat
+    book.update("base", "TOKENA", 0.115)
+    eng.tick()
+    book.update("base", "TOKENA", 0.145)
+    eng.tick()
+    sells = [t for t in pf.trades if t.side == "sell" and t.strategy_id == g.id]
+    assert len(sells) >= 2
+    # buy low / sell high → strategy pnl should be positive at current mark
+    assert g.pnl(0.145) > 0
+
+    # (d) restart preserves lots; re-anchor tick does not fire
+    eng, book, pf, store = _engine_with_store(db)
+    eng.cfg.min_slice_usd = 5
+    book.update("base", "TOKENA", 0.15)
+    g = eng.submit(parse_command(
+        "grid TOKENA between $0.10 and $0.14 with 3 levels, $50 per level"))
+    eng.tick()
+    book.update("base", "TOKENA", 0.10)
+    eng.tick()
+    assert len(g.grid_lots) == 3
+    sid, lots = g.id, dict(g.grid_lots)
+    fills_before = g.fills
+    store.close()
+
+    eng2, book2, pf2, store2 = _engine_with_store(db)
+    book2.update("base", "TOKENA", 0.10)
+    r = eng2.find(sid)
+    assert r is not None and len(r.grid_lots) == 3
+    assert r.prev_price == 0.0
+    eng2.tick()  # re-anchor only
+    assert r.fills == fills_before
+    assert len(r.grid_lots) == 3
+    assert abs(r.prev_price - 0.10) < 1e-12
+    store2.close()
+
+    # (e) risk-blocked buy does not create a phantom lot
+    eng, book, pf = _engine()
+    eng.cfg.min_slice_usd = 5
+    eng.cfg.risk = RiskConfig(max_daily_spend_usd=40)
+    book.update("base", "TOKENA", 0.15)
+    g = eng.submit(parse_command(
+        "grid TOKENA between $0.10 and $0.14 with 3 levels, $50 per level"))
+    eng.tick()
+    book.update("base", "TOKENA", 0.10)
+    eng.tick()
+    # first buy of $50 would exceed $40 daily cap → all buys blocked, no lots
+    assert len(g.grid_lots) == 0
+    assert g.blocked_reason and "daily spend" in g.blocked_reason
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

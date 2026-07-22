@@ -21,7 +21,7 @@ Each item should land with tests and a README update per `.cursor/rules/pulse.md
 
 ## P3 — strategy surface
 7. **Trailing stop** (done) — "sell all X if price falls 10% from its high".
-8. **Grid strategy** — "grid TOKENA between $0.08 and $0.14 with 7 levels, $50 per level".
+8. **Grid strategy** (done) — "grid TOKENA between $0.08 and $0.14 with 7 levels, $50 per level".
 9. **Strategy templates** — save a card as a template; one-click re-run with
    the same spec.
 

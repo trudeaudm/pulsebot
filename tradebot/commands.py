@@ -41,7 +41,7 @@ class Condition:
 
 @dataclass
 class StrategySpec:
-    kind: str                     # market | rate | triggered_rate | limit | stop | trailing_stop | cancel | pause | resume
+    kind: str                     # market | rate | triggered_rate | limit | stop | trailing_stop | grid | cancel | pause | resume
     side: str = "buy"             # buy | sell
     token: str = ""
     chain: str = ""               # empty -> default chain
@@ -54,6 +54,10 @@ class StrategySpec:
     condition: Optional[Condition] = None # must hold for rate execution to run
     limit_price: Optional[float] = None
     trail_pct: float = 0.0        # trailing stop drawdown percent from peak
+    grid_lower: float = 0.0
+    grid_upper: float = 0.0
+    grid_levels: int = 0
+    usd_per_level: float = 0.0
     raw_text: str = ""
     notes: list[str] = field(default_factory=list)
 
@@ -83,6 +87,9 @@ class StrategySpec:
             else:
                 tgt = f"${self.usd_amount:g} of {self.token}"
             bits = [f"trailing stop: sell {tgt} {self.trail_pct:g}% below peak"]
+        elif self.kind == "grid":
+            bits = [f"grid {self.token} ${self.grid_lower:g}–${self.grid_upper:g}, "
+                    f"{self.grid_levels} levels @ ${self.usd_per_level:g}"]
         elif self.kind == "rate":
             bits = [f"{self.side} {self.token} @ ${self.rate_usd_per_min:g}/min"]
             if self.condition:
@@ -144,12 +151,20 @@ RE_ON_TOKEN = re.compile(
     r"\bon\s+([A-Za-z][A-Za-z0-9_\-]{1,15})\b",
     re.I,
 )
+RE_GRID = re.compile(
+    rf"\bgrid\s+([A-Za-z][A-Za-z0-9_\-]{{1,15}})\s+"
+    rf"(?:between|from)\s*{NUM}\s*(?:and|to)\s*{NUM}",
+    re.I,
+)
+RE_GRID_LEVELS = re.compile(r"(\d+)\s*levels?", re.I)
+RE_GRID_SIZE = re.compile(rf"{NUM}\s*(?:per\s+level|each)\b", re.I)
 
 _STOPWORDS = {
     "THE", "A", "AN", "OF", "AT", "IF", "WHILE", "WHEN", "PRICE", "ALL", "MY",
     "IT", "NOW", "TOTAL", "RATE", "PER", "MINUTE", "HOUR", "SECOND", "USD",
     "DOLLARS", "WORTH", "UNTIL", "ONCE", "TO", "BASE", "ROBINHOOD", "CHAIN",
-    "TRAILING", "STOP", "FROM", "ITS", "HIGH", "PEAK", "WITH",
+    "TRAILING", "STOP", "FROM", "ITS", "HIGH", "PEAK", "WITH", "GRID",
+    "BETWEEN", "LEVELS", "LEVEL", "EACH",
 }
 
 
@@ -211,6 +226,29 @@ def parse_command(text: str) -> StrategySpec:
     mc = RE_ON_CHAIN.search(t)
     if mc:
         chain = "robinhood" if mc.group(1).lower().startswith("robinhood") else "base"
+
+    # -------- grid (before generic token/side parsing)
+    mg = RE_GRID.search(t)
+    if mg:
+        token = mg.group(1).upper()
+        lo, hi = _f(mg.group(2)), _f(mg.group(3))
+        ml = RE_GRID_LEVELS.search(t)
+        ms = RE_GRID_SIZE.search(t)
+        if not ml or not ms:
+            raise ParseError("grid needs N levels and $X per level / each")
+        levels = int(ml.group(1))
+        per = _f(ms.group(1))
+        if hi <= lo:
+            raise ParseError("grid upper must be greater than lower")
+        if not (2 <= levels <= 50):
+            raise ParseError("grid levels must be between 2 and 50")
+        if per <= 0:
+            raise ParseError("grid usd per level must be positive")
+        return StrategySpec(
+            kind="grid", side="buy", token=token, chain=chain,
+            grid_lower=lo, grid_upper=hi, grid_levels=levels, usd_per_level=per,
+            raw_text=text,
+        )
 
     side = "buy"
     ms = re.search(r"\b(buy|purchase|acquire)\b", t, re.I)

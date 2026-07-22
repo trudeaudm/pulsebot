@@ -40,6 +40,7 @@ you can rehearse trigger/rate strategies realistically before risking anything.
 | `sell all TOKENA if the price drops below $0.08` | stop |
 | `sell all TOKENA if the price falls 10% from its high` | trailing stop |
 | `trailing stop 10% on TOKENA` | trailing stop (sell all) |
+| `grid TOKENA between $0.08 and $0.14 with 7 levels, $50 per level` | synthetic grid |
 | `stop loss at $0.09 for $500 of TOKENA` | partial stop |
 | `sell TOKENA at a rate of $300 per minute while the price is above $0.15` | gated rate stream (TWAP) |
 | `buy $450 of TOKENA if the price goes below $0.1 … $100 per minute … total of $1200` | trigger + DCA with cap |
@@ -50,6 +51,14 @@ Rates accept `per second / minute / hour`. Rate strategies accrue budget
 continuously and flush a child order each time the accrued amount crosses
 `min_slice_usd`, so "$300/min" is a stream of small orders, not one lurch.
 The `while price …` gate freezes accrual whenever the condition is false.
+
+### Grid strategy
+
+A grid places evenly spaced price levels between a lower and upper bound.
+Crossing a level downward buys `$X` at that level (if no lot is held there);
+crossing the next level up sells that lot. Inventory is tracked per level,
+survives restarts, and the strategy runs until you cancel it (lots are left
+untouched on cancel). Risk caps apply to grid orders like any other fill.
 
 Set `anthropic_parser: true` (plus `ANTHROPIC_API_KEY`) and any phrasing the
 grammar can't match is parsed by the Claude API into the same schema.

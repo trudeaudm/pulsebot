@@ -31,6 +31,25 @@ def seed_id_counter(next_n: int) -> None:
     _id_counter = itertools.count(max(1, next_n))
 
 
+def grid_level_prices(lower: float, upper: float, n: int) -> list[float]:
+    """Evenly spaced levels L0=lower … L(n-1)=upper."""
+    if n <= 1:
+        return [lower]
+    return [lower + (upper - lower) * i / (n - 1) for i in range(n)]
+
+
+def _loads_grid_lots(row) -> dict:
+    import json
+    if "grid_lots_json" not in row.keys() or not row["grid_lots_json"]:
+        return {}
+    try:
+        raw = json.loads(row["grid_lots_json"])
+        return {int(k): {"qty": float(v["qty"]), "usd": float(v["usd"])}
+                for k, v in raw.items()}
+    except Exception:
+        return {}
+
+
 @dataclass
 class Strategy:
     spec: StrategySpec
@@ -53,6 +72,8 @@ class Strategy:
     error: str = ""
     blocked_reason: str = ""
     peak_price: float = 0.0       # trailing stop: highest price seen
+    prev_price: float = 0.0       # grid: last tick price (0 = re-anchor)
+    grid_lots: dict = field(default_factory=dict)  # level_index -> {qty, usd}
     _last_block_log: float = 0.0  # rate-limit blocked log lines (not persisted)
 
     # ---- per-strategy analytics -------------------------------------
@@ -90,6 +111,7 @@ class Strategy:
 
     def as_dict(self, price: float | None) -> dict:
         cap = self.spec.total_cap_usd or 0
+        deployed = sum(float(lot.get("usd", 0)) for lot in self.grid_lots.values())
         d = {
             "id": self.id,
             "text": self.spec.describe(),
@@ -119,6 +141,12 @@ class Strategy:
             "peak_price": self.peak_price if self.spec.kind == "trailing_stop" else None,
             "trail_trigger": self.trail_trigger(),
             "trail_distance_pct": self.trail_distance_pct(price),
+            "grid_lots_held": len(self.grid_lots) if self.spec.kind == "grid" else None,
+            "grid_levels": self.spec.grid_levels if self.spec.kind == "grid" else None,
+            "grid_deployed_usd": deployed if self.spec.kind == "grid" else None,
+            "grid_lower": self.spec.grid_lower if self.spec.kind == "grid" else None,
+            "grid_upper": self.spec.grid_upper if self.spec.kind == "grid" else None,
+            "usd_per_level": self.spec.usd_per_level if self.spec.kind == "grid" else None,
         }
         return d
 
@@ -208,6 +236,8 @@ class Engine:
                 peak_price=float(row["peak_price"]) if (
                     "peak_price" in row.keys() and row["peak_price"] is not None
                 ) else 0.0,
+                prev_price=0.0,  # re-anchor on first post-restore tick
+                grid_lots=_loads_grid_lots(row),
             )
             if s.status in ("active", "waiting"):
                 if live:
@@ -231,6 +261,7 @@ class Engine:
             n = 0
             for s in self.strategies:
                 if s.status in ("active", "waiting"):
+                    self._note_grid_cancel(s)
                     s.status = "cancelled"
                     self._persist_strategy(s)
                     n += 1
@@ -253,6 +284,10 @@ class Engine:
         if spec.token and spec.token not in self.cfg.chains[chain].tokens:
             known = ", ".join(self.cfg.chains[chain].tokens) or "none configured"
             raise ValueError(f"unknown token '{spec.token}' on {chain} (configured: {known})")
+        if spec.kind == "grid" and spec.usd_per_level < self.cfg.min_slice_usd:
+            raise ValueError(
+                f"grid usd per level (${spec.usd_per_level:g}) is below "
+                f"min_slice_usd (${self.cfg.min_slice_usd:g})")
 
         s = Strategy(spec=spec, chain=chain)
         if spec.kind in ("rate", "triggered_rate") and not spec.total_cap_usd:
@@ -270,14 +305,26 @@ class Engine:
         elif spec.kind == "trailing_stop":
             s.status = "active"
             s.peak_price = 0.0  # set on first observed tick price
+        elif spec.kind == "grid":
+            s.status = "active"
+            s.prev_price = 0.0
+            s.grid_lots = {}
         self.strategies.append(s)
         self._persist_strategy(s)
         self.log(f"{s.id} accepted: {spec.describe()}")
         return s
 
+    def _note_grid_cancel(self, s: Strategy) -> None:
+        if s.spec.kind != "grid" or not s.grid_lots:
+            return
+        deployed = sum(float(lot.get("usd", 0)) for lot in s.grid_lots.values())
+        self.log(f"{s.id} cancelled with {len(s.grid_lots)} lots remaining "
+                 f"(${deployed:,.0f} deployed; inventory left untouched)")
+
     def cancel(self, sid: str) -> bool:
         for s in self.strategies:
             if s.id == sid and s.status in ("active", "waiting"):
+                self._note_grid_cancel(s)
                 s.status = "cancelled"
                 self._persist_strategy(s)
                 self.log(f"{s.id} cancelled")
@@ -326,8 +373,23 @@ class Engine:
             "cum_series": cum_series,
             "fills_detail": [t.as_dict() for t in trades][::-1],
             "explorer": self.cfg.chains[s.chain].explorer if s.chain in self.cfg.chains else "",
+            "prev_price": s.prev_price if s.spec.kind == "grid" else None,
+            "grid_levels_view": self._grid_levels_view(s) if s.spec.kind == "grid" else None,
         })
         return d
+
+    def _grid_levels_view(self, s: Strategy) -> list[dict]:
+        levels = grid_level_prices(s.spec.grid_lower, s.spec.grid_upper, s.spec.grid_levels)
+        out = []
+        for i, px in enumerate(levels):
+            lot = s.grid_lots.get(i)
+            out.append({
+                "index": i,
+                "price": px,
+                "holding_qty": float(lot["qty"]) if lot else 0.0,
+                "holding_usd": float(lot["usd"]) if lot else 0.0,
+            })
+        return out
 
     def log(self, msg: str) -> None:
         self.events.append({"ts": time.time(), "msg": msg})
@@ -359,10 +421,14 @@ class Engine:
             if price is None:
                 continue
             try:
-                prev_status, prev_phase, prev_peak = s.status, s.phase, s.peak_price
+                prev_status, prev_phase = s.status, s.phase
+                prev_peak, prev_pp = s.peak_price, s.prev_price
+                prev_lots = len(s.grid_lots)
                 self._tick_strategy(s, price, dt)
                 if (s.status != prev_status or s.phase != prev_phase
-                        or s.peak_price != prev_peak):
+                        or s.peak_price != prev_peak
+                        or s.prev_price != prev_pp
+                        or len(s.grid_lots) != prev_lots):
                     self._persist_strategy(s)
             except Exception as e:
                 s.status = "error"
@@ -404,6 +470,10 @@ class Engine:
                              f"(peak ${s.peak_price:.6f})")
             return
 
+        if spec.kind == "grid":
+            self._tick_grid(s, price)
+            return
+
         if spec.kind == "triggered_rate" and s.phase == "waiting_trigger":
             if spec.trigger and spec.trigger.check(price):
                 s.phase = "streaming"
@@ -438,6 +508,74 @@ class Engine:
             if cap and s.spent_usd >= cap - 1e-9:
                 s.status = "done"
                 self.log(f"{s.id} completed cap of ${cap:g}")
+
+    def _tick_grid(self, s: Strategy, price: float) -> None:
+        spec = s.spec
+        levels = grid_level_prices(spec.grid_lower, spec.grid_upper, spec.grid_levels)
+        if s.prev_price <= 0:
+            s.prev_price = price
+            return
+        prev = s.prev_price
+        lo, hi = spec.grid_lower, spec.grid_upper
+        in_band = lo - 1e-12 <= price <= hi + 1e-12
+
+        # DOWNWARD crossings: highest level first
+        if price < prev:
+            for i in range(len(levels) - 1, -1, -1):
+                lv = levels[i]
+                if prev > lv >= price and i not in s.grid_lots and in_band:
+                    if self._grid_buy(s, spec.usd_per_level, price):
+                        trade = self.portfolio.trades[-1]
+                        s.grid_lots[i] = {"qty": trade.qty, "usd": trade.usd}
+                        self.log(f"{s.id} grid buy L{i} @ ${lv:g} "
+                                 f"(${spec.usd_per_level:g})")
+
+        # UPWARD crossings: lowest level first; sell lot at j-1 when crossing j
+        if price > prev:
+            for j in range(1, len(levels)):
+                lv = levels[j]
+                if prev < lv <= price and (j - 1) in s.grid_lots:
+                    lot = s.grid_lots[j - 1]
+                    if self._grid_sell(s, float(lot["qty"]), price):
+                        del s.grid_lots[j - 1]
+                        self.log(f"{s.id} grid sell L{j - 1}→L{j} @ ${lv:g}")
+            # Lot at the uppermost level sells when price crosses back up through it
+            top = len(levels) - 1
+            if top >= 0 and top in s.grid_lots and prev < levels[top] <= price:
+                lot = s.grid_lots[top]
+                if self._grid_sell(s, float(lot["qty"]), price):
+                    del s.grid_lots[top]
+                    self.log(f"{s.id} grid sell L{top} @ ${levels[top]:g} (upper)")
+
+        s.prev_price = price
+
+    def _grid_buy(self, s: Strategy, usd: float, price: float) -> bool:
+        spec = s.spec
+        old_side, old_usd, old_ta, old_sa = (
+            spec.side, spec.usd_amount, spec.token_amount, spec.sell_all)
+        try:
+            spec.side = "buy"
+            spec.usd_amount = usd
+            spec.token_amount = None
+            spec.sell_all = False
+            return self._child_order(s, usd, price)
+        finally:
+            spec.side, spec.usd_amount = old_side, old_usd
+            spec.token_amount, spec.sell_all = old_ta, old_sa
+
+    def _grid_sell(self, s: Strategy, qty: float, price: float) -> bool:
+        spec = s.spec
+        old_side, old_usd, old_ta, old_sa = (
+            spec.side, spec.usd_amount, spec.token_amount, spec.sell_all)
+        try:
+            spec.side = "sell"
+            spec.token_amount = qty
+            spec.sell_all = False
+            spec.usd_amount = 0.0
+            return self._fill_market(s, price)
+        finally:
+            spec.side, spec.usd_amount = old_side, old_usd
+            spec.token_amount, spec.sell_all = old_ta, old_sa
 
     # ------------------------------------------------------------- fills
 
