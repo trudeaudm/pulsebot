@@ -15,6 +15,10 @@ bot:
   port: 8420
   private_key_env: PULSE_PRIVATE_KEY   # env var holding your key in live mode. Never paste keys here.
   db_path: pulse.db                    # SQLite file for trades / strategies / equity (gitignored)
+  risk:
+    max_open_notional_usd_per_token: 0   # block buys that would push position value above this (0 = off)
+    max_daily_spend_usd: 0               # trailing 24h notional across all fills (0 = off)
+    default_cap_usd_for_uncapped: 0      # auto-cap rate / triggered_rate commands with no "total of $X" (0 = leave uncapped)
 
 chains:
   base:

@@ -6,9 +6,9 @@ Each item should land with tests and a README update per `.cursor/rules/pulse.md
 ## P1 — durability & trust
 1. **SQLite persistence + restart resume** (done) — trades, equity history, and
    strategy state survive restarts; active strategies resume armed/streaming.
-2. **Explorer links** — trade tape and fill history link tx hashes to the
+2. **Explorer links** (done) — trade tape and fill history link tx hashes to the
    per-chain explorer (Basescan / Robinhood Blockscout) from config.
-3. **Risk limits** — config-level guardrails: max open notional per token,
+3. **Risk limits** (done) — config-level guardrails: max open notional per token,
    max daily spend, per-strategy default cap when none given.
 
 ## P2 — execution quality

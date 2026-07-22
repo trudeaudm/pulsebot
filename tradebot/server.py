@@ -144,6 +144,8 @@ def _snapshot(cfg: BotConfig, engine: Engine, book: PriceBook,
     return {
         "mode": cfg.mode,
         "paused": engine.paused,
+        "chains": {k: {"name": c.name, "explorer": c.explorer}
+                   for k, c in cfg.chains.items()},
         "tokens": tokens,
         "strategies": [s.as_dict(book.price(s.chain, s.spec.token))
                        for s in reversed(engine.strategies)],

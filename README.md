@@ -91,6 +91,25 @@ python -m tradebot config.yaml --reset
 `--reset` renames the existing DB to `pulse.db.<timestamp>` (archives it) and
 boots against a fresh file.
 
+## Risk limits
+
+Optional guardrails under `bot.risk` in config (all default to `0` = off):
+
+| Key | Effect |
+|---|---|
+| `max_open_notional_usd_per_token` | Blocks **buys** that would push mark-to-market position value above the limit for that (chain, token). Sells are never blocked by this. |
+| `max_daily_spend_usd` | Blocks any child order when trailing-24h `trade.usd` sum plus this order would exceed the cap. |
+| `default_cap_usd_for_uncapped` | At submit, assigns this as `total_cap_usd` for rate / triggered_rate commands that omitted `until a total of $X`. |
+
+A blocked strategy stays `active` with a `blocked_reason` (amber on the card and
+detail overlay). Rate strategies do not stockpile accrual while blocked — budget
+is capped at one slice — so lifting the limit does not cause a burst. Engine log
+lines for blocks are rate-limited to once per minute per strategy.
+
+Live fills with a `tx_hash` link to `{explorer}/tx/{hash}` from each chain's
+`explorer` URL in config (trade tape + strategy fill history). Paper fills keep
+showing `paper`.
+
 ## Safety notes — please read
 
 - **Start in paper mode.** Then go live with small caps on a token you know.

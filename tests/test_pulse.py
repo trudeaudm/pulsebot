@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tradebot.commands import parse_command
-from tradebot.config import BotConfig, ChainConfig, TokenConfig
+from tradebot.config import BotConfig, ChainConfig, RiskConfig, TokenConfig
 from tradebot.portfolio import Portfolio
 from tradebot.prices import PriceBook
 from tradebot.strategies import Engine
@@ -242,6 +242,92 @@ def test_reset_archives_db(tmp_path=None):
     assert archived.name.startswith("pulse.db.")
     # second reset with nothing to archive
     assert archive_db(db) is None
+
+
+def test_risk_open_notional_blocks_buys_not_sells():
+    eng, book, pf = _engine()
+    eng.cfg.risk = RiskConfig(max_open_notional_usd_per_token=100)
+    book.update("base", "TOKENA", 0.10)
+    eng.submit(parse_command("buy $80 of TOKENA"))
+    eng.tick()
+    assert pf.qty("base", "TOKENA") * 0.10 > 70
+    buy = eng.submit(parse_command("buy $50 of TOKENA"))
+    eng.tick()
+    assert buy.status == "active"
+    assert buy.blocked_reason and "open notional" in buy.blocked_reason
+    assert buy.fills == 0
+    # sells are never blocked by open-notional
+    s2 = eng.submit(parse_command(
+        "sell TokenA at a rate of $60 per minute while the price is above $0.05 "
+        "until a total of $30"))
+    for _ in range(60):
+        s2.last_tick -= 1
+        eng.tick()
+    assert s2.fills >= 1
+    assert "open notional" not in (s2.blocked_reason or "")
+
+
+def test_risk_daily_spend_window():
+    eng, book, pf = _engine()
+    eng.cfg.risk = RiskConfig(max_daily_spend_usd=100)
+    eng.cfg.min_slice_usd = 10
+    book.update("base", "TOKENA", 0.10)
+    s = eng.submit(parse_command(
+        "buy TokenA at a rate of $300 per minute until a total of $400"))
+    for _ in range(120):
+        s.last_tick -= 1
+        eng.tick()
+        if s.blocked_reason:
+            break
+    assert s.blocked_reason and "daily spend" in s.blocked_reason
+    assert s.status == "active"
+    spent = sum(t.usd for t in pf.trades)
+    assert spent <= 100 + eng.cfg.min_slice_usd  # may overshoot by at most one slice attempt size
+    assert spent <= 100 + 50  # generous bound
+    fills_at_block = s.fills
+    # age trades out of the 24h window — cap should free
+    for t in pf.trades:
+        t.ts -= 86_400 + 10
+    s._last_block_log = 0
+    for _ in range(10):
+        s.last_tick -= 1
+        eng.tick()
+    assert s.fills > fills_at_block
+    assert s.blocked_reason == ""
+
+
+def test_risk_default_cap_for_uncapped():
+    eng, book, pf = _engine()
+    eng.cfg.risk = RiskConfig(default_cap_usd_for_uncapped=250)
+    book.update("base", "TOKENA", 0.10)
+    s = eng.submit(parse_command(
+        "buy TokenA at a rate of $120 per minute while the price is above $0.05"))
+    assert s.spec.total_cap_usd == 250
+    assert any("default cap" in n for n in s.spec.notes)
+    assert any("default cap" in e["msg"] for e in eng.events)
+
+
+def test_risk_blocked_rate_no_accrual_burst():
+    eng, book, pf = _engine()
+    eng.cfg.risk = RiskConfig(max_daily_spend_usd=25)
+    eng.cfg.min_slice_usd = 10
+    book.update("base", "TOKENA", 0.10)
+    s = eng.submit(parse_command(
+        "buy TokenA at a rate of $600 per minute until a total of $500"))
+    for _ in range(80):
+        s.last_tick -= 1
+        eng.tick()
+        if s.blocked_reason:
+            break
+    assert s.blocked_reason
+    slice_usd = min(max(eng.cfg.min_slice_usd, s.spec.rate_usd_per_min / 6),
+                    (s.spec.total_cap_usd or 500) - s.spent_usd)
+    # keep ticking while blocked — accrued must stay <= one slice
+    for _ in range(60):
+        s.last_tick -= 1
+        eng.tick()
+        assert s.accrued_usd <= slice_usd + 1e-6
+    assert s.status == "active"
 
 
 if __name__ == "__main__":

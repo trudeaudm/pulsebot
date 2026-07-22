@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS strategies (
     first_fill REAL NOT NULL,
     last_fill REAL NOT NULL,
     last_tick REAL NOT NULL,
-    error TEXT NOT NULL DEFAULT ''
+    error TEXT NOT NULL DEFAULT '',
+    blocked_reason TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS equity (
     time REAL NOT NULL,
@@ -109,7 +110,15 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(strategies)")}
+        if "blocked_reason" not in cols:
+            self._conn.execute(
+                "ALTER TABLE strategies ADD COLUMN blocked_reason TEXT NOT NULL DEFAULT ''"
+            )
 
     def close(self) -> None:
         try:
@@ -198,8 +207,8 @@ class Store:
                 "INSERT INTO strategies("
                 "id, spec_json, chain, status, phase, paused, accrued_usd, "
                 "spent_usd, fills, qty_bought, qty_sold, usd_bought, usd_sold, "
-                "created, first_fill, last_fill, last_tick, error) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "created, first_fill, last_fill, last_tick, error, blocked_reason) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "spec_json=excluded.spec_json, chain=excluded.chain, "
                 "status=excluded.status, phase=excluded.phase, "
@@ -209,12 +218,13 @@ class Store:
                 "usd_bought=excluded.usd_bought, usd_sold=excluded.usd_sold, "
                 "created=excluded.created, first_fill=excluded.first_fill, "
                 "last_fill=excluded.last_fill, last_tick=excluded.last_tick, "
-                "error=excluded.error",
+                "error=excluded.error, blocked_reason=excluded.blocked_reason",
                 (
                     s.id, spec_to_json(s.spec), s.chain, s.status, s.phase,
                     1 if s.paused else 0, s.accrued_usd, s.spent_usd, s.fills,
                     s.qty_bought, s.qty_sold, s.usd_bought, s.usd_sold,
                     s.created, s.first_fill, s.last_fill, s.last_tick, s.error,
+                    s.blocked_reason or "",
                 ),
             )
             self._conn.commit()

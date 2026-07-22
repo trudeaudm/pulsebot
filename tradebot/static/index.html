@@ -101,6 +101,9 @@ tr:last-child td{border-bottom:none}
 .bar i{display:block;height:100%;background:var(--accent)}
 .card .nums{display:flex;justify-content:space-between;font-family:var(--mono);font-size:11px;margin-top:9px}
 .card .nums .k{color:var(--dim);font-size:9px;letter-spacing:.1em;text-transform:uppercase;display:block}
+.blocked{font-family:var(--mono);font-size:11px;color:var(--amber);margin-top:7px}
+.txlink{color:var(--dim);text-decoration:none}
+.txlink:hover{color:var(--accent-text)}
 .empty{padding:18px 14px;color:var(--dim);font-size:12.5px}
 
 /* ---- expanded strategy view ---- */
@@ -168,7 +171,7 @@ footer b{color:var(--amber)}
     <div class="panel">
       <h2>Trade tape</h2>
       <div class="scroll"><table id="trades">
-        <thead><tr><th>time</th><th>side</th><th>token</th><th>usd</th><th>price</th><th>slip</th><th>strat</th></tr></thead>
+        <thead><tr><th>time</th><th>side</th><th>token</th><th>usd</th><th>price</th><th>slip</th><th>strat</th><th>tx</th></tr></thead>
         <tbody></tbody></table></div>
     </div>
   </div>
@@ -196,6 +199,14 @@ const $ = s => document.querySelector(s);
 const fmt = (n,d=2) => n==null?'—':Number(n).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
 const fpx = p => p==null?'—':(p>=100?fmt(p,2):p>=1?fmt(p,4):fmt(p,6));
 const ts = t => new Date(t*1000).toLocaleTimeString();
+let chainsMap = {};
+function txCell(t, explorer){
+  if(!t.tx_hash) return t.mode || 'paper';
+  const base=(explorer||'').replace(/\/$/,'');
+  if(!base) return t.tx_hash.slice(0,10)+'…';
+  const href=`${base}/tx/${t.tx_hash}`;
+  return `<a class="txlink" href="${href}" target="_blank" rel="noopener">${t.tx_hash.slice(0,10)}…</a>`;
+}
 
 const HINTS = [
   'sell TOKENA at a rate of $300 per minute while the price is above $0.15',
@@ -257,6 +268,7 @@ $('#cmd').addEventListener('keydown',e=>{if(e.key==='Enter')send()});
 // ---------- state stream
 function statCell(k,v,cls=''){return `<div class="stat"><div class="k">${k}</div><div class="v ${cls}">${v}</div></div>`}
 function render(st){
+  if(st.chains) chainsMap=st.chains;
   $('#mode').textContent=st.paused?'paused':st.mode;
   $('#mode').className='mode'+(st.mode==='live'?' live':'')+(st.paused?' paused':'');
   if(!tokens.length||tokens.length!==st.tokens.length){tokens=st.tokens;if(!sel){sel=tokens[0];if(sel)applyTheme(sel.chain);}renderTabs();loadCandles();}
@@ -290,6 +302,7 @@ function render(st){
         <span class="tok">${x.token}<i class="chainmini">${x.chain}</i></span>
         <span class="side ${x.side}">${x.side}</span>${badge}</div>
       <div class="desc" title="${x.raw.replace(/"/g,'&quot;')}">${x.text}</div>
+      ${x.blocked_reason?`<div class="blocked">${x.blocked_reason}</div>`:''}
       ${x.progress!=null?`<div class="bar"><i style="width:${Math.min(100,x.progress*100)}%"></i></div>`:''}
       <div class="nums">
         <div><span class="k">filled</span>$${fmt(x.spent_usd,0)}${x.cap_usd?'<span style="color:var(--dim)">/'+fmt(x.cap_usd,0)+'</span>':''}</div>
@@ -302,7 +315,8 @@ function render(st){
   $('#trades tbody').innerHTML=st.trades.map(t=>`
     <tr><td>${ts(t.ts)}</td><td class="${t.side==='buy'?'pos':'neg'}">${t.side}</td>
     <td>${t.token}</td><td>$${fmt(t.usd)}</td><td>${fpx(t.price)}</td>
-    <td>${fmt(t.slippage_bps,1)}</td><td>${t.strategy_id}</td></tr>`).join('');
+    <td>${fmt(t.slippage_bps,1)}</td><td>${t.strategy_id}</td>
+    <td>${txCell(t,(chainsMap[t.chain]||{}).explorer)}</td></tr>`).join('');
 
   $('#positions tbody').innerHTML=s.positions.map(p=>`
     <tr><td>${p.token}·${p.chain}</td><td>${fmt(p.qty,2)}</td><td>${fpx(p.avg_price)}</td>
@@ -367,7 +381,8 @@ async function refreshDetail(){
       <span class="side ${d.side}">${d.side}</span>${badge}
       <button class="close" onclick="closeDetail()">esc ✕</button></div>
     <div class="raw">&gt; <b>${d.raw}</b>${conditions?`<div style="margin-top:6px">${conditions}</div>`:''}
-      ${d.error?`<div class="neg" style="margin-top:6px">${d.error}</div>`:''}</div>
+      ${d.error?`<div class="neg" style="margin-top:6px">${d.error}</div>`:''}
+      ${d.blocked_reason?`<div class="blocked" style="margin-top:6px">${d.blocked_reason}</div>`:''}</div>
     ${running?`<div class="ctrl">
       <button onclick="act('${d.id}','${d.paused?'resume':'pause'}')">${d.paused?'▶ resume':'⏸ pause'}</button>
       <button class="danger" onclick="act('${d.id}','cancel')">✕ cancel strategy</button>
@@ -390,7 +405,7 @@ async function refreshDetail(){
       <tbody>${d.fills_detail.map(t=>`
         <tr><td>${ts(t.ts)}</td><td class="${t.side==='buy'?'pos':'neg'}">${t.side}</td>
         <td>$${fmt(t.usd)}</td><td>${fmt(t.qty,2)}</td><td>${fpx(t.price)}</td>
-        <td>${fmt(t.slippage_bps,1)}</td><td>${t.tx_hash?t.tx_hash.slice(0,10)+'…':t.mode}</td></tr>`).join('')
+        <td>${fmt(t.slippage_bps,1)}</td><td>${txCell(t,d.explorer)}</td></tr>`).join('')
         ||'<tr><td colspan="7" class="empty">no fills yet'+(d.phase==='waiting_trigger'?' — waiting for trigger':'')+'</td></tr>'}
       </tbody></table></div>`;
 

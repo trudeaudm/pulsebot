@@ -51,6 +51,8 @@ class Strategy:
     last_fill: float = 0.0
     last_tick: float = field(default_factory=time.time)
     error: str = ""
+    blocked_reason: str = ""
+    _last_block_log: float = 0.0  # rate-limit blocked log lines (not persisted)
 
     # ---- per-strategy analytics -------------------------------------
 
@@ -98,6 +100,8 @@ class Strategy:
             "created": self.created,
             "last_fill": self.last_fill,
             "error": self.error,
+            "blocked_reason": self.blocked_reason,
+            "notes": list(self.spec.notes),
         }
 
 
@@ -181,6 +185,8 @@ class Engine:
                 last_fill=row["last_fill"],
                 last_tick=now,
                 error=row["error"] or "",
+                blocked_reason=(row["blocked_reason"] if "blocked_reason" in row.keys()
+                                else "") or "",
             )
             if s.status in ("active", "waiting"):
                 if live:
@@ -228,6 +234,13 @@ class Engine:
             raise ValueError(f"unknown token '{spec.token}' on {chain} (configured: {known})")
 
         s = Strategy(spec=spec, chain=chain)
+        if spec.kind in ("rate", "triggered_rate") and not spec.total_cap_usd:
+            dcap = self.cfg.risk.default_cap_usd_for_uncapped
+            if dcap > 0:
+                spec.total_cap_usd = dcap
+                note = f"default cap ${dcap:g} applied"
+                spec.notes.append(note)
+                self.log(f"{s.id} {note}")
         if spec.kind in ("triggered_rate", "stop", "limit"):
             s.phase = "waiting_trigger"
             s.status = "waiting"
@@ -288,6 +301,7 @@ class Engine:
             "avg_fill_usd": s.spent_usd / s.fills if s.fills else 0.0,
             "cum_series": cum_series,
             "fills_detail": [t.as_dict() for t in trades][::-1],
+            "explorer": self.cfg.chains[s.chain].explorer if s.chain in self.cfg.chains else "",
         })
         return d
 
@@ -335,22 +349,21 @@ class Engine:
         spec = s.spec
 
         if spec.kind == "market":
-            self._fill_market(s, price)
-            s.status = "done"
+            if self._fill_market(s, price):
+                s.status = "done"
             return
 
         if spec.kind == "limit":
             hit = price <= spec.limit_price if spec.side == "buy" else price >= spec.limit_price
-            if hit:
-                self._fill_market(s, price)
+            if hit and self._fill_market(s, price):
                 s.status = "done"
             return
 
         if spec.kind == "stop":
             if spec.trigger and spec.trigger.check(price):
-                self._fill_market(s, price)
-                s.status = "done"
-                self.log(f"{s.id} stop fired at ${price:.6f}")
+                if self._fill_market(s, price):
+                    s.status = "done"
+                    self.log(f"{s.id} stop fired at ${price:.6f}")
             return
 
         if spec.kind == "triggered_rate" and s.phase == "waiting_trigger":
@@ -358,30 +371,39 @@ class Engine:
                 s.phase = "streaming"
                 s.status = "active"
                 self.log(f"{s.id} trigger hit at ${price:.6f}")
-                if spec.usd_amount > 0:
-                    self._child_order(s, spec.usd_amount, price)
-                if not spec.rate_usd_per_min:
-                    s.status = "done"
-            return
+            else:
+                return
 
         if s.phase == "streaming":
+            # one-shot / initial trigger notional (retries if risk-blocked)
+            if (spec.kind == "triggered_rate" and spec.usd_amount > 0
+                    and s.fills == 0 and s.spent_usd < 1e-9):
+                if not self._child_order(s, spec.usd_amount, price):
+                    return
+            if not spec.rate_usd_per_min:
+                s.status = "done"
+                return
             if spec.condition and not spec.condition.check(price):
                 return  # gated: accrue nothing while condition is false
             s.accrued_usd += spec.rate_usd_per_min * (dt / 60.0)
             cap = spec.total_cap_usd
             remaining = (cap - s.spent_usd) if cap else float("inf")
             slice_usd = min(max(self.cfg.min_slice_usd, spec.rate_usd_per_min / 6), remaining)
+            if s.blocked_reason:
+                s.accrued_usd = min(s.accrued_usd, slice_usd)
             if s.accrued_usd >= slice_usd and remaining > 0:
                 amt = min(s.accrued_usd, remaining)
-                s.accrued_usd = 0.0
-                self._child_order(s, amt, price)
+                if self._child_order(s, amt, price):
+                    s.accrued_usd = 0.0
+                else:
+                    s.accrued_usd = min(s.accrued_usd, slice_usd)
             if cap and s.spent_usd >= cap - 1e-9:
                 s.status = "done"
                 self.log(f"{s.id} completed cap of ${cap:g}")
 
     # ------------------------------------------------------------- fills
 
-    def _fill_market(self, s: Strategy, price: float) -> None:
+    def _fill_market(self, s: Strategy, price: float) -> bool:
         spec = s.spec
         if spec.side == "sell" and (spec.sell_all or spec.token_amount is not None):
             qty = (self.portfolio.qty(s.chain, spec.token) if spec.sell_all
@@ -391,9 +413,35 @@ class Engine:
             usd = spec.usd_amount
         if usd <= 0:
             raise ValueError("nothing to trade (zero size)")
-        self._child_order(s, usd, price)
+        return self._child_order(s, usd, price)
 
-    def _child_order(self, s: Strategy, usd: float, ref_price: float) -> None:
+    def _risk_block_reason(self, s: Strategy, usd: float, ref_price: float) -> str | None:
+        risk = self.cfg.risk
+        if risk.max_open_notional_usd_per_token > 0 and s.spec.side == "buy":
+            open_n = self.portfolio.qty(s.chain, s.spec.token) * ref_price
+            if open_n + usd > risk.max_open_notional_usd_per_token + 1e-9:
+                return (f"open notional cap "
+                        f"${risk.max_open_notional_usd_per_token:g} for {s.spec.token}")
+        if risk.max_daily_spend_usd > 0:
+            cutoff = time.time() - 86_400
+            spent_24h = sum(t.usd for t in self.portfolio.trades if t.ts >= cutoff)
+            if spent_24h + usd > risk.max_daily_spend_usd + 1e-9:
+                return f"daily spend cap ${risk.max_daily_spend_usd:g}"
+        return None
+
+    def _note_blocked(self, s: Strategy, reason: str) -> None:
+        s.blocked_reason = reason
+        now = time.time()
+        if now - s._last_block_log >= 60.0:
+            self.log(f"{s.id} blocked: {reason}")
+            s._last_block_log = now
+        self._persist_strategy(s)
+
+    def _child_order(self, s: Strategy, usd: float, ref_price: float) -> bool:
+        reason = self._risk_block_reason(s, usd, ref_price)
+        if reason:
+            self._note_blocked(s, reason)
+            return False
         spec = s.spec
         if self.cfg.mode == "live":
             trade = self._execute_live(s, usd, ref_price)
@@ -412,11 +460,13 @@ class Engine:
         if not s.first_fill:
             s.first_fill = trade.ts
         s.last_fill = trade.ts
+        if s.blocked_reason:
+            s.blocked_reason = ""
         self._persist_strategy(s)
         self._persist_meta()
         self.log(f"{s.id} {spec.side} ${usd:,.2f} {spec.token} @ ${trade.price:.6f}"
                  + (f" tx {trade.tx_hash[:10]}…" if trade.tx_hash else ""))
-
+        return True
     def _execute_paper(self, s: Strategy, usd: float, ref_price: float) -> Trade:
         spec = s.spec
         fee = self.cfg.paper_fee_bps

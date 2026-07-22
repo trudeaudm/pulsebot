@@ -38,6 +38,13 @@ class ChainConfig:
 
 
 @dataclass
+class RiskConfig:
+    max_open_notional_usd_per_token: float = 0.0  # 0 = unlimited
+    max_daily_spend_usd: float = 0.0              # trailing 24h, 0 = unlimited
+    default_cap_usd_for_uncapped: float = 0.0     # 0 = leave uncapped
+
+
+@dataclass
 class BotConfig:
     mode: str = "paper"                   # "paper" or "live"
     default_chain: str = "base"
@@ -52,6 +59,7 @@ class BotConfig:
     port: int = 8420
     private_key_env: str = "PULSE_PRIVATE_KEY"
     db_path: str = "pulse.db"
+    risk: RiskConfig = field(default_factory=RiskConfig)
     chains: dict[str, ChainConfig] = field(default_factory=dict)
 
     @property
@@ -104,6 +112,14 @@ def load_config(path: str | None = None) -> BotConfig:
         )
 
     bot = raw.get("bot") or {}
+    risk_raw = bot.get("risk") or {}
+    risk = RiskConfig(
+        max_open_notional_usd_per_token=float(
+            risk_raw.get("max_open_notional_usd_per_token", 0) or 0),
+        max_daily_spend_usd=float(risk_raw.get("max_daily_spend_usd", 0) or 0),
+        default_cap_usd_for_uncapped=float(
+            risk_raw.get("default_cap_usd_for_uncapped", 0) or 0),
+    )
     return BotConfig(
         mode=bot.get("mode", "paper"),
         default_chain=bot.get("default_chain", next(iter(chains), "base")),
@@ -118,5 +134,6 @@ def load_config(path: str | None = None) -> BotConfig:
         port=int(bot.get("port", 8420)),
         private_key_env=bot.get("private_key_env", "PULSE_PRIVATE_KEY"),
         db_path=bot.get("db_path", "pulse.db"),
+        risk=risk,
         chains=chains,
     )
