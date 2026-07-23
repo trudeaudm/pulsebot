@@ -838,10 +838,10 @@ def test_pool_route_config_defaults():
     assert degen.pool_type == "v2" and degen.route == "weth" and degen.pool_fee == 10000
     assert cfg.chains["base"].weth_usdc_fee == 500
     assert cfg.chains["base"].weth_token.lower().startswith("0x4200")
-    # example config defaults
+    # example config: empty tokens, routing defaults present on chains
     ex = load_config("config.example.yaml", dotenv_path=root / "none")
-    ta = ex.chains["base"].tokens["TOKENA"]
-    assert ta.pool_type == "v3" and ta.route == "direct"
+    assert ex.chains["base"].tokens == {}
+    assert ex.chains["robinhood"].tokens == {}
     assert ex.chains["base"].weth_usdc_fee == 500
     assert ex.chains["base"].weth_token == ""  # commented in example
 

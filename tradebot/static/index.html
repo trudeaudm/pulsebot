@@ -65,6 +65,11 @@ main{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(340px,1fr);gap:14
 .tab{font-family:var(--mono);font-size:11px;padding:3px 10px;border:1px solid var(--line);border-radius:3px;color:var(--dim);cursor:pointer;background:none}
 .tab.on{border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft)}
 #chart{height:340px}
+.chartwrap{position:relative}
+.chart-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  color:var(--faint);font-family:var(--mono);font-size:13px;text-align:center;padding:24px;
+  pointer-events:none;line-height:1.5}
+.chart-empty[hidden]{display:none!important}
 #equity{height:120px;border-top:1px solid var(--line)}
 .chartfoot{display:flex;justify-content:space-between;font-family:var(--mono);font-size:11px;color:var(--dim);padding:6px 14px;border-top:1px solid var(--line)}
 
@@ -154,7 +159,7 @@ footer b{color:var(--amber)}
     <div class="cmd-field">
       <div class="cmd-ghost" id="cmdghost" aria-hidden="true"></div>
       <input id="cmd" autocomplete="off" spellcheck="false"
-        placeholder='sell TOKENA at a rate of $300 per minute while the price is above $0.15'>
+        placeholder='watch 0x… on base'>
     </div>
     <button id="send">Run</button>
   </div>
@@ -174,7 +179,10 @@ footer b{color:var(--amber)}
     <div class="panel">
       <h2>Price <span id="pxlabel" style="font-family:var(--mono);color:var(--text)"></span>
         <div class="tabs" id="tokentabs"></div></h2>
-      <div id="chart"></div>
+      <div class="chartwrap">
+        <div id="chart"></div>
+        <div class="chart-empty" id="chartempty">paste a contract address to start watching a token</div>
+      </div>
       <div id="equity"></div>
       <div class="chartfoot"><span>candles 15s</span><span>equity (USD)</span></div>
     </div>
@@ -224,12 +232,12 @@ function pxCell(t){
 }
 
 const HINTS = [
-  'sell TOKENA at a rate of $300 per minute while the price is above $0.15',
-  'buy $450 of TOKENA if the price goes below $0.1 while the price is below $0.1 continue to buy at a rate of $100 per minute until you have bought a total of $1200',
-  'buy $200 of TOKENA',
-  'sell all TOKENA if the price drops below $0.08',
-  'watch 0x…',
-  'unwatch SYMBOL',
+  'watch 0x… on base',
+  'sell DEGEN at a rate of $300 per minute while the price is above $0.15',
+  'buy $450 of DEGEN if the price goes below $0.1 while the price is below $0.1 continue to buy at a rate of $100 per minute until you have bought a total of $1200',
+  'buy $200 of DEGEN',
+  'sell all DEGEN if the price drops below $0.08',
+  'unwatch DEGEN',
   'cancel all',
 ];
 HINTS.forEach(h=>{const b=document.createElement('div');b.className='hint';b.textContent=h.length>58?h.slice(0,58)+'…':h;b.title=h;b.onclick=()=>{$('#cmd').value=h;$('#cmd').focus()};$('#hints').appendChild(b);});
@@ -253,9 +261,14 @@ function applyTheme(chain){
   $('#chainchip').textContent=chain;
   eqSeries.applyOptions({lineColor:t.text,topColor:t.area,bottomColor:'rgba(0,0,0,0)'});
 }
-let tokens=[], sel=null;
+let tokens=[], sel=null, tokenSig='';
+function updateChartEmpty(){
+  const el=$('#chartempty');
+  if(!el) return;
+  el.hidden=!!(tokens&&tokens.length);
+}
 async function loadCandles(){
-  if(!sel) return;
+  if(!sel){ candleSeries.setData([]); return; }
   const r = await fetch(`/api/candles/${sel.chain}/${sel.token}`);
   candleSeries.setData(await r.json());
 }
@@ -265,9 +278,10 @@ function renderTabs(){
     const b=document.createElement('button');
     b.className='tab'+((sel&&sel.chain===t.chain&&sel.token===t.token)?' on':'');
     b.textContent=`${t.token}·${t.chain}`;
-    b.onclick=()=>{sel=t;applyTheme(t.chain);renderTabs();loadCandles();};
+    b.onclick=()=>{sel=t;applyTheme(t.chain);renderTabs();updateChartEmpty();loadCandles();};
     tabs.appendChild(b);
   });
+  updateChartEmpty();
 }
 
 // ---------- command box: history + autocomplete + send
@@ -416,10 +430,21 @@ function render(st){
   if(st.chains) chainsMap=st.chains;
   $('#mode').textContent=st.paused?'paused':st.mode;
   $('#mode').className='mode'+(st.mode==='live'?' live':'')+(st.paused?' paused':'');
-  if(!tokens.length||tokens.length!==st.tokens.length){tokens=st.tokens;if(!sel){sel=tokens[0];if(sel)applyTheme(sel.chain);}renderTabs();loadCandles();}
-  tokens=st.tokens;
-  const cur=st.tokens.find(t=>sel&&t.chain===sel.chain&&t.token===sel.token);
+  const sig=(st.tokens||[]).map(t=>`${t.chain}:${t.token}`).join('|');
+  if(sig!==tokenSig){
+    tokenSig=sig;
+    tokens=st.tokens||[];
+    if(!(sel&&tokens.some(t=>t.chain===sel.chain&&t.token===sel.token)))
+      sel=tokens[0]||null;
+    if(sel) applyTheme(sel.chain);
+    renderTabs();
+    loadCandles();
+  }else{
+    tokens=st.tokens||[];
+  }
+  const cur=tokens.find(t=>sel&&t.chain===sel.chain&&t.token===sel.token);
   if(cur) $('#pxlabel').textContent=`${cur.token} $${fpx(cur.price)}`;
+  else $('#pxlabel').textContent='';
 
   const s=st.stats;
   $('#stats').innerHTML =

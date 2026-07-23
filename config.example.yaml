@@ -39,16 +39,9 @@ chains:
     # Uncomment for v2 / WETH multi-hop (DEGEN-style pairs):
     # weth_token: "0x4200000000000000000000000000000000000006"
     # v2_router: "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"
-    tokens:
-      - symbol: TOKENA          # rename to your token; add as many as you like
-        address: ""             # ERC-20 address (required for live mode / live prices)
-        decimals: 18
-        pool_fee: 3000          # v3 fee: token<->USDC (direct) or token<->WETH (route: weth)
-        pool_type: v3           # v3 | v2
-        route: direct           # direct | weth (token <-> WETH <-> USDC)
-        dexscreener_pair: ""    # optional: pin a specific pair for the price feed
-        paper_start_price: 0.12
-        paper_volatility: 0.006
+    # no tokens pre-configured — paste a contract address into the command bar to
+    # watch one, or define tokens here for simulated paper trading (omit address to simulate)
+    tokens: []
 
   robinhood:
     name: Robinhood Chain
@@ -68,12 +61,6 @@ chains:
     weth_token: ""              # wrapped native for route: weth
     v2_router: ""               # Uniswap v2-style router
     weth_usdc_fee: 500
-    tokens:
-      - symbol: TOKENB
-        address: ""
-        decimals: 18
-        pool_fee: 3000
-        pool_type: v3
-        route: direct
-        paper_start_price: 0.42
-        paper_volatility: 0.005
+    # no tokens pre-configured — paste a contract address into the command bar to
+    # watch one, or define tokens here for simulated paper trading (omit address to simulate)
+    tokens: []

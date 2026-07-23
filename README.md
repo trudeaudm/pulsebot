@@ -3,8 +3,9 @@
 Type plain English, get executed strategies:
 
 ```
-> sell TOKENA at a rate of $300 per minute while the price is above $0.15
-> buy $450 of TOKENA if the price goes below $0.1 while the price is below $0.1
+> watch 0x4ed4e862860bed51a9570b96d89af5e1b0efefed on base
+> sell DEGEN at a rate of $300 per minute while the price is above $0.15
+> buy $450 of DEGEN if the price goes below $0.1 while the price is below $0.1
   continue to buy at a rate of $100 per minute until you have bought a total of $1200
 ```
 
@@ -25,9 +26,13 @@ python -m tradebot
 # open http://127.0.0.1:8420
 ```
 
-Paper mode runs a mean-reverting price simulator per token, fills against it
-with a fee + size-impact model, and your fills push the simulated price — so
-you can rehearse trigger/rate strategies realistically before risking anything.
+Boot with an empty token list, paste a contract address
+(`watch 0x… on base`), and trade on paper against live Dexscreener prices —
+that's the primary flow. No Alchemy key required for paper fills.
+
+**Secondary path — simulated tokens:** define a token in config without an
+`address` (and without `dexscreener_pair`) to drive it with the mean-reverting
+paper simulator (fee + size-impact fills that nudge the simulated price).
 
 ### Secrets & RPCs
 
@@ -49,13 +54,13 @@ rate-limited fallback.
 
 ### Paper trading against live prices
 
-Keep `mode: paper`, set the token's `address` (and optionally `dexscreener_pair`)
-under a chain that has `dexscreener_slug`, and leave everything else as-is.
-That token is priced only from Dexscreener — the simulator never writes it —
-while fills stay simulated (fee + impact on the fill price, no feed nudge).
-Tokens without a usable live source keep the GBM simulator. At boot each token
-logs `simulated` or `live via dexscreener`; a live-sourced token with no quote
-after 30s emits an engine error naming the token (bad address or unindexed pair).
+Keep `mode: paper`, watch a CA (or set the token's `address` / optional
+`dexscreener_pair` under a chain with `dexscreener_slug`). That token is priced
+only from Dexscreener — the simulator never writes it — while fills stay
+simulated (fee + impact on the fill price, no feed nudge). Tokens without a
+usable live source keep the GBM simulator. At boot each token logs `simulated`
+or `live via dexscreener`; a live-sourced token with no quote after 30s emits
+an engine error naming the token (bad address or unindexed pair).
 
 ## Command grammar
 
