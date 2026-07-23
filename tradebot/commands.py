@@ -22,8 +22,89 @@ from typing import Optional
 NUM = r"\$?\s*([0-9][0-9,]*\.?[0-9]*)"
 
 
+class ParseError(Exception):
+    pass
+
+
+_WORD_NUMS = {
+    "a": 1, "an": 1,
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+    "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+}
+_WORD_ALT = "|".join(sorted(_WORD_NUMS, key=len, reverse=True))
+# digit capture OR word-number capture (one group each — callers check)
+AMT = rf"(?:{NUM}|({_WORD_ALT}))"
+
+
 def _f(s: str) -> float:
     return float(s.replace(",", "").replace("$", "").strip())
+
+
+def _amt(digit: str | None, word: str | None) -> float:
+    if word:
+        return float(_WORD_NUMS[word.lower()])
+    assert digit is not None
+    return _f(digit)
+
+
+def _unit_to_minutes(count: float, unit: str) -> float:
+    u = unit.lower()
+    if u.startswith("min"):
+        return count
+    if u.startswith(("hour", "hr")):
+        return count * 60.0
+    if u.startswith("sec"):
+        return count / 60.0
+    raise ParseError(f"unknown time unit '{unit}'")
+
+
+@dataclass
+class _Spans:
+    """Tracks character spans consumed by the grammar for the strict-parse guard."""
+    text: str
+    spans: list[tuple[int, int]] = field(default_factory=list)
+
+    def add(self, m: re.Match | None) -> re.Match | None:
+        if m is not None:
+            self.spans.append((m.start(), m.end()))
+        return m
+
+    def leftover(self) -> str:
+        mask = [False] * len(self.text)
+        for a, b in self.spans:
+            for i in range(max(0, a), min(b, len(self.text))):
+                mask[i] = True
+        chunks: list[str] = []
+        buf: list[str] = []
+        for i, ch in enumerate(self.text):
+            if mask[i]:
+                if buf:
+                    chunks.append("".join(buf))
+                    buf = []
+            else:
+                buf.append(ch)
+        if buf:
+            chunks.append("".join(buf))
+        return " ".join(" ".join(chunks).split())
+
+
+_SIGNAL_RE = re.compile(
+    r"\b(every|per|for|while|if|when|until|above|below|total|stop|trailing|grid|rate)\b|%",
+    re.I,
+)
+
+
+def _strict_guard(spans: _Spans, spec: StrategySpec) -> StrategySpec:
+    left = spans.leftover()
+    if left and _SIGNAL_RE.search(left):
+        raise ParseError(
+            f"understood '{spec.describe()}' but couldn't parse: '{left}' — "
+            f"rephrase or split into two commands."
+        )
+    return spec
 
 
 @dataclass
@@ -111,10 +192,6 @@ class StrategySpec:
         return ", ".join(bits)
 
 
-class ParseError(Exception):
-    pass
-
-
 # ---------------------------------------------------------------- clause regexes
 
 RE_SIDE_TOKEN = re.compile(
@@ -177,6 +254,19 @@ RE_BARE_ADDR = re.compile(
     r"^\s*(0x[a-fA-F0-9]{40})\s*(?:on\s+(base|robinhood(?:\s*chain)?))?\s*$",
     re.I,
 )
+RE_EVERY = re.compile(
+    rf"\bevery\s+(?:(?:{NUM}|({_WORD_ALT}))\s+)?"
+    rf"(minutes?|mins?|hours?|hrs?|seconds?|secs?)\b",
+    re.I,
+)
+RE_DURATION = re.compile(
+    rf"\bfor\s+(?:the\s+next\s+)?"
+    rf"(?:(half)\s+an?\s+hour|"
+    rf"an?\s+(hour|minute|min|second|sec)s?|"
+    rf"(?:(?:{NUM}|({_WORD_ALT}))\s+)"
+    rf"(minutes?|mins?|hours?|hrs?|seconds?|secs?))\b",
+    re.I,
+)
 
 _STOPWORDS = {
     "THE", "A", "AN", "OF", "AT", "IF", "WHILE", "WHEN", "PRICE", "ALL", "MY",
@@ -228,51 +318,108 @@ def _find_token(text: str) -> str:
     return ""
 
 
+def _duration_minutes(m: re.Match) -> float:
+    """Parse RE_DURATION groups into minutes."""
+    if m.group(1):  # half an hour
+        return 30.0
+    if m.group(2):  # an hour / a minute / …
+        return _unit_to_minutes(1.0, m.group(2))
+    count = _amt(m.group(3), m.group(4))
+    return _unit_to_minutes(count, m.group(5))
+
+
+def _every_period_minutes(m: re.Match) -> float:
+    """Parse RE_EVERY groups into the period length in minutes."""
+    count = 1.0
+    if m.group(1) or m.group(2):
+        count = _amt(m.group(1), m.group(2))
+    return _unit_to_minutes(count, m.group(3))
+
+
+def _span_usd_of(spans: _Spans, text: str, m: re.Match) -> None:
+    """Record USD-of match; also consume a leading 'for ' (stop-loss sizing)."""
+    start = m.start()
+    mfor = re.search(r"\bfor\s+$", text[:start], re.I)
+    if mfor:
+        spans.spans.append((mfor.start(), m.end()))
+    else:
+        spans.add(m)
+
+
+def _span_total(spans: _Spans, text: str, m: re.Match) -> None:
+    """Record total match; consume leading 'until …' filler when present."""
+    start = m.start()
+    m_until = re.search(
+        r"\buntil\b(?:\s+you\s+have\s+(?:bought|sold))?(?:\s+a)?\s+$",
+        text[:start],
+        re.I,
+    )
+    if m_until:
+        spans.spans.append((m_until.start(), m.end()))
+    else:
+        spans.add(m)
+
+
+def _span_token(spans: _Spans, text: str, token: str) -> None:
+    if not token:
+        return
+    for rx in (RE_USD_OF, RE_SELL_ALL, RE_TOKEN_AMOUNT, RE_SIDE_TOKEN, RE_ON_TOKEN, RE_GRID):
+        for m in rx.finditer(text):
+            if token.lower() in m.group(0).lower():
+                spans.add(m)
+                return
+    spans.add(re.search(rf"\b{re.escape(token)}\b", text, re.I))
+
+
 def parse_command(text: str) -> StrategySpec:
     """Deterministic grammar parse. Raises ParseError when nothing matches."""
     t = " ".join(text.strip().split())
     if not t:
         raise ParseError("empty command")
+    spans = _Spans(t)
 
-    if RE_RESUME.search(t):
-        return StrategySpec(kind="resume", raw_text=text)
-    if RE_PAUSE.search(t):
-        return StrategySpec(kind="pause", raw_text=text)
-    if RE_CANCEL.search(t) and not re.search(r"stop\s*loss", t, re.I):
-        return StrategySpec(kind="cancel", raw_text=text)
+    m = spans.add(RE_RESUME.search(t))
+    if m:
+        return _strict_guard(spans, StrategySpec(kind="resume", raw_text=text))
+    m = spans.add(RE_PAUSE.search(t))
+    if m:
+        return _strict_guard(spans, StrategySpec(kind="pause", raw_text=text))
+    m = spans.add(RE_CANCEL.search(t))
+    if m and not re.search(r"stop\s*loss", t, re.I):
+        return _strict_guard(spans, StrategySpec(kind="cancel", raw_text=text))
 
     chain = ""
-    mc = RE_ON_CHAIN.search(t)
+    mc = spans.add(RE_ON_CHAIN.search(t))
     if mc:
         chain = "robinhood" if mc.group(1).lower().startswith("robinhood") else "base"
 
     # -------- watch / unwatch / bare CA paste
-    mu = RE_UNWATCH.match(t)
+    mu = spans.add(RE_UNWATCH.match(t))
     if mu:
-        return StrategySpec(
-            kind="unwatch", token=mu.group(1).upper(), chain=chain, raw_text=text)
+        return _strict_guard(spans, StrategySpec(
+            kind="unwatch", token=mu.group(1).upper(), chain=chain, raw_text=text))
 
-    mw = RE_WATCH.match(t)
+    mw = spans.add(RE_WATCH.match(t))
     if mw:
-        return StrategySpec(
-            kind="watch", address=mw.group(1), chain=chain, raw_text=text)
+        return _strict_guard(spans, StrategySpec(
+            kind="watch", address=mw.group(1), chain=chain, raw_text=text))
 
-    mb = RE_BARE_ADDR.match(t)
+    mb = spans.add(RE_BARE_ADDR.match(t))
     if mb:
         bare_chain = chain
         if mb.group(2):
             bare_chain = ("robinhood" if mb.group(2).lower().startswith("robinhood")
                           else "base")
-        return StrategySpec(
-            kind="watch", address=mb.group(1), chain=bare_chain, raw_text=text)
+        return _strict_guard(spans, StrategySpec(
+            kind="watch", address=mb.group(1), chain=bare_chain, raw_text=text))
 
     # -------- grid (before generic token/side parsing)
-    mg = RE_GRID.search(t)
+    mg = spans.add(RE_GRID.search(t))
     if mg:
         token = mg.group(1).upper()
         lo, hi = _f(mg.group(2)), _f(mg.group(3))
-        ml = RE_GRID_LEVELS.search(t)
-        ms = RE_GRID_SIZE.search(t)
+        ml = spans.add(RE_GRID_LEVELS.search(t))
+        ms = spans.add(RE_GRID_SIZE.search(t))
         if not ml or not ms:
             raise ParseError("grid needs N levels and $X per level / each")
         levels = int(ml.group(1))
@@ -283,22 +430,27 @@ def parse_command(text: str) -> StrategySpec:
             raise ParseError("grid levels must be between 2 and 50")
         if per <= 0:
             raise ParseError("grid usd per level must be positive")
-        return StrategySpec(
+        for soft in re.finditer(r"\bwith\b|,", t, re.I):
+            spans.add(soft)
+        return _strict_guard(spans, StrategySpec(
             kind="grid", side="buy", token=token, chain=chain,
             grid_lower=lo, grid_upper=hi, grid_levels=levels, usd_per_level=per,
             raw_text=text,
-        )
+        ))
 
     side = "buy"
-    ms = re.search(r"\b(buy|purchase|acquire)\b", t, re.I)
-    if not ms and re.search(r"\b(sell|dump|unload)\b", t, re.I):
-        side = "sell"
+    ms = spans.add(re.search(r"\b(buy|purchase|acquire)\b", t, re.I))
+    if not ms:
+        ms = spans.add(re.search(r"\b(sell|dump|unload)\b", t, re.I))
+        if ms:
+            side = "sell"
 
     token = _find_token(t)
+    _span_token(spans, t, token)
 
     # stop loss / take profit shorthand
-    msl = RE_STOPLOSS.search(t)
-    mtp = RE_TAKEPROFIT.search(t)
+    msl = spans.add(RE_STOPLOSS.search(t))
+    mtp = spans.add(RE_TAKEPROFIT.search(t))
     if msl or mtp:
         m = msl or mtp
         op = "below" if msl else "above"
@@ -306,51 +458,92 @@ def parse_command(text: str) -> StrategySpec:
         mu = RE_USD_OF.search(t)
         if mu:
             usd = _f(mu.group(1))
-        return StrategySpec(
+            _span_usd_of(spans, t, mu)
+        return _strict_guard(spans, StrategySpec(
             kind="stop", side="sell", token=token, chain=chain, usd_amount=usd,
             trigger=Condition(op, _f(m.group(1))), raw_text=text,
-        )
+        ))
 
     trigger = None
-    mt = RE_TRIGGER.search(t)
+    mt = spans.add(RE_TRIGGER.search(t))
     if mt:
         trigger = Condition(_norm_op(mt.group(1)), _f(mt.group(2)))
 
     condition = None
-    mw = RE_WHILE.search(t)
+    mw = spans.add(RE_WHILE.search(t))
     if mw:
         condition = Condition(_norm_op(mw.group(1)), _f(mw.group(2)))
 
     rate = 0.0
-    mr = RE_RATE.search(t) or RE_RATE_ALT.search(t)
+    mr = spans.add(RE_RATE.search(t)) or spans.add(RE_RATE_ALT.search(t))
     if mr:
         rate = _rate_per_min(_f(mr.group(1)), mr.group(2))
 
     total = None
-    for m in RE_TOTAL.finditer(t):
-        total = _f(m.group(1) or m.group(2))
+    for mtot in RE_TOTAL.finditer(t):
+        total = _f(mtot.group(1) or mtot.group(2))
+        _span_total(spans, t, mtot)
 
     usd = 0.0
     mu = RE_USD_OF.search(t)
     if mu:
         usd = _f(mu.group(1))
+        _span_usd_of(spans, t, mu)
     elif "$" in t and not rate:
-        m = re.search(NUM.replace(r"\$?", r"\$"), t)
-        if m:
-            usd = _f(m.group(1))
+        mdollar = re.search(NUM.replace(r"\$?", r"\$"), t)
+        if mdollar:
+            usd = _f(mdollar.group(1))
+            spans.add(mdollar)
+
+    # periodic "every <unit>" → rate from notional / period
+    me = spans.add(RE_EVERY.search(t))
+    if me:
+        if usd <= 0 and not rate:
+            raise ParseError("every <period> needs a dollar amount to turn into a rate")
+        period = _every_period_minutes(me)
+        if period <= 0:
+            raise ParseError("every <period> must be a positive duration")
+        rate = (usd if usd > 0 else rate) / period
+
+    # duration → total_cap = rate * minutes (requires a rate)
+    md = spans.add(RE_DURATION.search(t))
+    if md:
+        if rate <= 0:
+            raise ParseError(
+                "duration ('for …') needs a rate — e.g. add 'every minute' or "
+                "'at a rate of $X per minute'"
+            )
+        total = rate * _duration_minutes(md)
 
     token_amount = None
-    sell_all = bool(RE_SELL_ALL.search(t))
+    msa = spans.add(RE_SELL_ALL.search(t))
+    sell_all = bool(msa)
     if not sell_all and not usd:
         mta = RE_TOKEN_AMOUNT.search(t)
         if mta and mta.group(2).upper() not in _STOPWORDS:
             token_amount = _f(mta.group(1))
+            spans.add(mta)
 
     if not token and not sell_all:
         raise ParseError("couldn't work out which token you mean")
 
+    # soft glue words that aren't meaning-bearing once clauses are consumed
+    for soft in re.finditer(
+        r"\b(?:continue\s+to|with\s+a|with|at\s+a|at|then|and|of)\b|,", t, re.I
+    ):
+        spans.add(soft)
+
     # -------- trailing stop (before other classify so "% from high" wins)
-    trail_m = RE_TRAILING_STOP.search(t) or RE_FALLS_FROM_HIGH.search(t)
+    trail_m = spans.add(RE_TRAILING_STOP.search(t))
+    falls_m = None if trail_m else RE_FALLS_FROM_HIGH.search(t)
+    if falls_m:
+        # consume optional "if the price" lead-in with the falls clause
+        lead = re.search(r"\bif\s+(?:the\s+)?price\s+$", t[:falls_m.start()], re.I)
+        if lead:
+            spans.spans.append((lead.start(), falls_m.end()))
+        else:
+            spans.add(falls_m)
+        trail_m = falls_m
     if trail_m:
         trail_pct = _f(trail_m.group(1))
         if trail_pct <= 0 or trail_pct >= 100:
@@ -358,47 +551,47 @@ def parse_command(text: str) -> StrategySpec:
         sa = sell_all
         if not sa and not usd and token_amount is None:
             sa = True  # default size: sell all
-        return StrategySpec(
+        return _strict_guard(spans, StrategySpec(
             kind="trailing_stop", side="sell", token=token, chain=chain,
             usd_amount=usd, token_amount=token_amount, sell_all=sa,
             trail_pct=trail_pct, raw_text=text,
-        )
+        ))
 
     # -------- classify
     if trigger and rate:
-        return StrategySpec(
+        return _strict_guard(spans, StrategySpec(
             kind="triggered_rate", side=side, token=token, chain=chain,
             usd_amount=usd, rate_usd_per_min=rate, total_cap_usd=total,
             trigger=trigger, condition=condition or Condition(trigger.op, trigger.value),
             raw_text=text,
-        )
+        ))
     if trigger and side == "sell" and (usd or sell_all or token_amount):
-        return StrategySpec(
+        return _strict_guard(spans, StrategySpec(
             kind="stop", side="sell", token=token, chain=chain, usd_amount=usd,
             token_amount=token_amount, sell_all=sell_all, trigger=trigger, raw_text=text,
-        )
+        ))
     if trigger:
-        return StrategySpec(
+        return _strict_guard(spans, StrategySpec(
             kind="triggered_rate", side=side, token=token, chain=chain,
             usd_amount=usd, trigger=trigger, total_cap_usd=total, raw_text=text,
-        )
+        ))
     if rate:
-        return StrategySpec(
+        return _strict_guard(spans, StrategySpec(
             kind="rate", side=side, token=token, chain=chain,
             rate_usd_per_min=rate, condition=condition, total_cap_usd=total,
             raw_text=text,
-        )
-    ml = RE_LIMIT.search(t)
+        ))
+    ml = spans.add(RE_LIMIT.search(t))
     if ml and usd:
-        return StrategySpec(
+        return _strict_guard(spans, StrategySpec(
             kind="limit", side=side, token=token, chain=chain, usd_amount=usd,
             limit_price=_f(ml.group(1)), raw_text=text,
-        )
+        ))
     if usd or sell_all or token_amount is not None:
-        return StrategySpec(
+        return _strict_guard(spans, StrategySpec(
             kind="market", side=side, token=token, chain=chain, usd_amount=usd,
             token_amount=token_amount, sell_all=sell_all, raw_text=text,
-        )
+        ))
     raise ParseError("couldn't understand that command")
 
 

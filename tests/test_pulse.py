@@ -41,6 +41,34 @@ def test_market_stop_misc():
     assert s.kind == "stop" and s.trigger.op == "below"
 
 
+def test_every_duration_and_strict_guard():
+    from tradebot.commands import ParseError
+
+    s = parse_command(
+        "buy $100 of DEGEN every minute for the next ten minutes")
+    assert s.kind == "rate" and s.side == "buy" and s.token == "DEGEN"
+    assert abs(s.rate_usd_per_min - 100) < 1e-9
+    assert abs(s.total_cap_usd - 1000) < 1e-9
+
+    s = parse_command("buy $50 of TOKENA every 2 minutes for an hour")
+    assert s.kind == "rate" and abs(s.rate_usd_per_min - 25) < 1e-9
+    assert abs(s.total_cap_usd - 1500) < 1e-9
+
+    try:
+        parse_command("buy $100 of TOKENA for 10 minutes")
+        assert False, "expected ParseError for duration without rate"
+    except ParseError as e:
+        assert "duration" in str(e).lower() or "rate" in str(e).lower()
+
+    try:
+        parse_command("buy $100 of TOKENA every fortnight")
+        assert False, "expected strict-parse guard refusal"
+    except ParseError as e:
+        msg = str(e)
+        assert "couldn't parse" in msg and "every" in msg.lower()
+        assert "understood" in msg
+
+
 def test_trailing_stop_parse():
     s = parse_command("sell all TOKENA if the price falls 10% from its high")
     assert s.kind == "trailing_stop" and s.sell_all and s.trail_pct == 10

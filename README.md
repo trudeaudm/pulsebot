@@ -83,15 +83,27 @@ an engine error naming the token (bad address or unindexed pair).
 | `stop loss at $0.09 for $500 of TOKENA` | partial stop |
 | `sell TOKENA at a rate of $300 per minute while the price is above $0.15` | gated rate stream (TWAP) |
 | `buy $450 of TOKENA if the price goes below $0.1 … $100 per minute … total of $1200` | trigger + DCA with cap |
+| `buy $100 of TOKENA every minute for the next ten minutes` | rate $100/min, cap $1000 |
+| `buy $50 of TOKENA every 2 minutes for an hour` | rate $25/min, cap $1500 |
 | `… on robinhood` / `… on base` | route to a specific chain |
 | `watch 0x…` / `add token 0x…` / bare `0x…` | discover & add a live-priced token tab |
 | `unwatch SYMBOL` / `remove SYMBOL` | drop a watched token (not config tokens) |
 | `cancel all`, `pause`, `resume` | engine controls |
 
-Rates accept `per second / minute / hour`. Rate strategies accrue budget
-continuously and flush a child order each time the accrued amount crosses
-`min_slice_usd`, so "$300/min" is a stream of small orders, not one lurch.
-The `while price …` gate freezes accrual whenever the condition is false.
+Rates accept `per second / minute / hour`, plus periodic forms (`every minute`,
+`every 2 minutes`, `every hour`, `every 30 seconds`). Word numbers
+(`one`…`twenty`, `thirty`/`forty`/…/`sixty`, `a`/`an`, `half an hour`) work in
+rate and duration positions. A duration (`for 10 minutes`, `for an hour`,
+`for the next ten minutes`) sets `total_cap_usd = rate × duration`; a duration
+without a rate is refused. After a successful parse, any leftover clause with
+signal words (`every`, `per`, `for`, `while`, `if`, `until`, …) is refused so
+Pulse never executes a partial understanding — rephrase or split into two
+commands.
+
+Rates accrue budget continuously and flush a child order each time the accrued
+amount crosses `min_slice_usd`, so "$300/min" is a stream of small orders, not
+one lurch. The `while price …` gate freezes accrual whenever the condition is
+false.
 
 ### Grid strategy
 
