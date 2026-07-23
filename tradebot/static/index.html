@@ -228,6 +228,8 @@ const HINTS = [
   'buy $450 of TOKENA if the price goes below $0.1 while the price is below $0.1 continue to buy at a rate of $100 per minute until you have bought a total of $1200',
   'buy $200 of TOKENA',
   'sell all TOKENA if the price drops below $0.08',
+  'watch 0x…',
+  'unwatch SYMBOL',
   'cancel all',
 ];
 HINTS.forEach(h=>{const b=document.createElement('div');b.className='hint';b.textContent=h.length>58?h.slice(0,58)+'…':h;b.title=h;b.onclick=()=>{$('#cmd').value=h;$('#cmd').focus()};$('#hints').appendChild(b);});
@@ -269,7 +271,7 @@ function renderTabs(){
 }
 
 // ---------- command box: history + autocomplete + send
-const VERBS=['buy','sell','grid','trailing','cancel','pause','resume'];
+const VERBS=['buy','sell','grid','trailing','cancel','pause','resume','watch','unwatch'];
 const cmdHistory=[];
 let histIdx=-1, histDraft='', ghostSuffix='', notifPrimed=false, lastEventTs=0, logFlashTimer=0;
 

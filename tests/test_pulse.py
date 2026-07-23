@@ -657,6 +657,189 @@ def test_event_levels():
     assert any(e["level"] == "error" and s2.id in e["msg"] for e in eng2.events)
 
 
+# ----- watch any CA -------------------------------------------------------
+
+_WATCH_ADDR = "0x4ed4e862860bed51a9570b96d89af5e1b0efefed"
+_QUOTE_ONLY = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+
+
+def _canned_pairs_payload():
+    """Deep base-token pair + shallower base pair + quote-side match (ignore)."""
+    return {
+        "pairs": [
+            {
+                "chainId": "base",
+                "dexId": "uniswap",
+                "pairAddress": "0xpairdeep",
+                "priceUsd": "0.00212",
+                "liquidity": {"usd": 35_400_000},
+                "baseToken": {"address": _WATCH_ADDR, "symbol": "DEGEN",
+                              "name": "Degen"},
+                "quoteToken": {"address": _QUOTE_ONLY, "symbol": "USDC"},
+            },
+            {
+                "chainId": "base",
+                "dexId": "aerodrome",
+                "pairAddress": "0xpairshallow",
+                "priceUsd": "0.00200",
+                "liquidity": {"usd": 1_000_000},
+                "baseToken": {"address": _WATCH_ADDR, "symbol": "DEGEN",
+                              "name": "Degen"},
+                "quoteToken": {"address": _QUOTE_ONLY, "symbol": "USDC"},
+            },
+            {
+                # watched address is only the quote — must be ignored
+                "chainId": "base",
+                "dexId": "uniswap",
+                "pairAddress": "0xquoteonly",
+                "priceUsd": "1.0",
+                "liquidity": {"usd": 99_000_000},
+                "baseToken": {"address": "0xother", "symbol": "OTHER",
+                              "name": "Other"},
+                "quoteToken": {"address": _WATCH_ADDR, "symbol": "DEGEN"},
+            },
+            {
+                "chainId": "ethereum",  # wrong chain
+                "dexId": "uniswap",
+                "pairAddress": "0xeth",
+                "priceUsd": "0.01",
+                "liquidity": {"usd": 99_000_000},
+                "baseToken": {"address": _WATCH_ADDR, "symbol": "DEGEN",
+                              "name": "Degen"},
+                "quoteToken": {"address": _QUOTE_ONLY, "symbol": "USDC"},
+            },
+        ]
+    }
+
+
+def _low_liq_payload():
+    return {
+        "pairs": [{
+            "chainId": "base",
+            "dexId": "uniswap",
+            "pairAddress": "0xlow",
+            "priceUsd": "0.05",
+            "liquidity": {"usd": 12_500},
+            "baseToken": {"address": _WATCH_ADDR, "symbol": "THIN",
+                          "name": "ThinCoin"},
+            "quoteToken": {"address": _QUOTE_ONLY, "symbol": "USDC"},
+        }]
+    }
+
+
+def _watch_engine(fetch=None):
+    cfg = BotConfig(chains={"base": ChainConfig(
+        name="Base", chain_id=8453, rpc_url="",
+        dexscreener_slug="base",
+        tokens={"TOKENA": TokenConfig(symbol="TOKENA")})})
+    cfg.min_slice_usd = 5
+    book = PriceBook()
+    pf = Portfolio(cash_usd=10_000)
+    return Engine(cfg, book, pf, None, {},
+                  registry_fetch=fetch or (lambda url: _canned_pairs_payload())), book, pf
+
+
+def test_watch_parse():
+    s = parse_command(f"watch {_WATCH_ADDR}")
+    assert s.kind == "watch" and s.address.lower() == _WATCH_ADDR
+    s = parse_command(f"add token {_WATCH_ADDR} on base")
+    assert s.kind == "watch" and s.chain == "base"
+    s = parse_command(_WATCH_ADDR)
+    assert s.kind == "watch" and s.address.lower() == _WATCH_ADDR
+    s = parse_command("unwatch DEGEN")
+    assert s.kind == "unwatch" and s.token == "DEGEN"
+    s = parse_command("remove DEGEN-2 on robinhood")
+    assert s.kind == "unwatch" and s.token == "DEGEN-2" and s.chain == "robinhood"
+
+
+def test_registry_picks_deepest_base_pair():
+    from tradebot.registry import resolve
+    chain = ChainConfig(name="Base", chain_id=8453, rpc_url="",
+                        dexscreener_slug="base")
+    info = resolve(_WATCH_ADDR, chain, fetch=lambda url: _canned_pairs_payload())
+    assert info["pair_address"] == "0xpairdeep"
+    assert info["symbol"] == "DEGEN"
+    assert abs(info["liquidity_usd"] - 35_400_000) < 1
+    assert abs(info["price_usd"] - 0.00212) < 1e-9
+
+
+def test_watch_then_market_buy():
+    eng, book, pf = _watch_engine()
+    w = parse_command(f"watch {_WATCH_ADDR}")
+    eng.submit(w)
+    assert "DEGEN" in eng.cfg.chains["base"].tokens
+    assert ("base", "DEGEN") in eng.watched_keys
+    assert book.price("base", "DEGEN") is not None
+    assert "watching DEGEN" in w.describe() and "uniswap" in w.describe()
+    # not registered with PaperFeed (none) — live source by address+slug
+    from tradebot.prices import has_live_price_source
+    assert has_live_price_source(
+        eng.cfg.chains["base"].tokens["DEGEN"], eng.cfg.chains["base"])
+    s = eng.submit(parse_command("buy $50 of DEGEN"))
+    eng.tick()
+    assert s.fills == 1
+    assert abs(pf.trades[-1].usd - 50) < 1e-6
+    assert pf.trades[-1].token == "DEGEN"
+
+
+def test_unwatch_blocked_by_strategy():
+    eng, book, pf = _watch_engine()
+    eng.submit(parse_command(f"watch {_WATCH_ADDR}"))
+    eng.submit(parse_command(
+        "buy DEGEN at a rate of $60 per minute until a total of $120"))
+    try:
+        eng.submit(parse_command("unwatch DEGEN"))
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "strategy" in str(e).lower()
+    # config token refused
+    try:
+        eng.submit(parse_command("unwatch TOKENA"))
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "config" in str(e).lower()
+
+
+def test_watched_tokens_survive_store_roundtrip():
+    import tempfile
+    from tradebot.store import Store
+    root = Path(tempfile.mkdtemp())
+    db = root / "w.db"
+    store = Store(db)
+    eng, book, pf = _watch_engine()
+    eng.store = store
+    store.set_on_error(lambda msg: eng.log(msg))
+    eng.submit(parse_command(f"watch {_WATCH_ADDR}"))
+    assert store.load_watched_tokens()
+    # new engine + restore
+    cfg2 = BotConfig(chains={"base": ChainConfig(
+        name="Base", chain_id=8453, rpc_url="",
+        dexscreener_slug="base",
+        tokens={"TOKENA": TokenConfig(symbol="TOKENA")})})
+    book2 = PriceBook()
+    pf2 = Portfolio(cash_usd=10_000)
+    store2 = Store(db)
+    eng2 = Engine(cfg2, book2, pf2, None, {}, store=store2)
+    eng2.restore()
+    assert "DEGEN" in eng2.cfg.chains["base"].tokens
+    assert ("base", "DEGEN") in eng2.watched_keys
+    tok = eng2.cfg.chains["base"].tokens["DEGEN"]
+    assert tok.address.lower() == _WATCH_ADDR
+    assert tok.dexscreener_pair == "0xpairdeep"
+    # strategy on watched symbol validates after restore
+    s = eng2.submit(parse_command("buy $10 of DEGEN"))
+    assert s is not None and s.spec.token == "DEGEN"
+
+
+def test_watch_low_liquidity_alert():
+    eng, book, pf = _watch_engine(fetch=lambda url: _low_liq_payload())
+    w = parse_command(f"watch {_WATCH_ADDR}")
+    eng.submit(w)
+    assert "low liquidity" in w.describe().lower()
+    assert any(e["level"] == "alert" and "low liquidity" in e["msg"]
+               for e in eng.events)
+
+
 def test_paper_feed_defers_to_live_source():
     """Address+slug → Dexscreener only; slugless (even with address) stays simulated."""
     cfg = BotConfig(chains={

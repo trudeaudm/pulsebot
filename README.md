@@ -55,6 +55,8 @@ after 30s emits an engine error naming the token (bad address or unindexed pair)
 | `sell TOKENA at a rate of $300 per minute while the price is above $0.15` | gated rate stream (TWAP) |
 | `buy $450 of TOKENA if the price goes below $0.1 … $100 per minute … total of $1200` | trigger + DCA with cap |
 | `… on robinhood` / `… on base` | route to a specific chain |
+| `watch 0x…` / `add token 0x…` / bare `0x…` | discover & add a live-priced token tab |
+| `unwatch SYMBOL` / `remove SYMBOL` | drop a watched token (not config tokens) |
 | `cancel all`, `pause`, `resume` | engine controls |
 
 Rates accept `per second / minute / hour`. Rate strategies accrue budget
@@ -86,6 +88,16 @@ Trigger fires, trailing-stop fires, cap completions, and grid sells emit
 After you submit your first command, the dashboard may ask for notification
 permission and will flash the engine log (and notify, if allowed) on new
 alert/error events.
+
+### Watching tokens
+
+Paste a contract address (`watch 0x…`, `add token 0x…`, or a bare `0x…`) to
+pull the deepest Dexscreener pair on that chain (needs `dexscreener_slug` in
+config). Pulse adds a tab immediately, prices it from Dexscreener (never the
+paper simulator), and persists the watch across restarts. `unwatch SYMBOL`
+removes it — refused while an active strategy or open position still
+references the token, and never applies to tokens from `config.yaml`. Low
+liquidity (< $100k) gets a warning on the command echo and an alert event.
 
 Set `anthropic_parser: true` (plus `ANTHROPIC_API_KEY`) and any phrasing the
 grammar can't match is parsed by the Claude API into the same schema.

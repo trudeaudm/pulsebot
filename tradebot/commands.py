@@ -41,10 +41,11 @@ class Condition:
 
 @dataclass
 class StrategySpec:
-    kind: str                     # market | rate | triggered_rate | limit | stop | trailing_stop | grid | cancel | pause | resume
+    kind: str                     # market | rate | triggered_rate | limit | stop | trailing_stop | grid | watch | unwatch | cancel | pause | resume
     side: str = "buy"             # buy | sell
     token: str = ""
     chain: str = ""               # empty -> default chain
+    address: str = ""             # watch: contract address
     usd_amount: float = 0.0       # one-shot notional (market/limit/trigger leg)
     token_amount: Optional[float] = None  # sell N tokens instead of $ notional
     sell_all: bool = False
@@ -66,6 +67,10 @@ class StrategySpec:
             return "cancel all strategies"
         if self.kind in ("pause", "resume"):
             return f"{self.kind} engine"
+        if self.kind == "watch":
+            return self.notes[0] if self.notes else f"watch {self.address}"
+        if self.kind == "unwatch":
+            return self.notes[0] if self.notes else f"unwatch {self.token}"
         bits = [self.side, self.token or "?"]
         if self.kind == "market":
             if self.sell_all:
@@ -158,6 +163,20 @@ RE_GRID = re.compile(
 )
 RE_GRID_LEVELS = re.compile(r"(\d+)\s*levels?", re.I)
 RE_GRID_SIZE = re.compile(rf"{NUM}\s*(?:per\s+level|each)\b", re.I)
+RE_ADDR = re.compile(r"(0x[a-fA-F0-9]{40})")
+RE_WATCH = re.compile(
+    r"^\s*(?:watch|add\s+token)\s+(0x[a-fA-F0-9]{40})\b",
+    re.I,
+)
+RE_UNWATCH = re.compile(
+    r"^\s*(?:unwatch|remove(?:\s+token)?)\s+([A-Za-z][A-Za-z0-9_\-]{0,20})"
+    r"(?:\s+on\s+(?:base|robinhood(?:\s*chain)?))?\s*$",
+    re.I,
+)
+RE_BARE_ADDR = re.compile(
+    r"^\s*(0x[a-fA-F0-9]{40})\s*(?:on\s+(base|robinhood(?:\s*chain)?))?\s*$",
+    re.I,
+)
 
 _STOPWORDS = {
     "THE", "A", "AN", "OF", "AT", "IF", "WHILE", "WHEN", "PRICE", "ALL", "MY",
@@ -226,6 +245,26 @@ def parse_command(text: str) -> StrategySpec:
     mc = RE_ON_CHAIN.search(t)
     if mc:
         chain = "robinhood" if mc.group(1).lower().startswith("robinhood") else "base"
+
+    # -------- watch / unwatch / bare CA paste
+    mu = RE_UNWATCH.match(t)
+    if mu:
+        return StrategySpec(
+            kind="unwatch", token=mu.group(1).upper(), chain=chain, raw_text=text)
+
+    mw = RE_WATCH.match(t)
+    if mw:
+        return StrategySpec(
+            kind="watch", address=mw.group(1), chain=chain, raw_text=text)
+
+    mb = RE_BARE_ADDR.match(t)
+    if mb:
+        bare_chain = chain
+        if mb.group(2):
+            bare_chain = ("robinhood" if mb.group(2).lower().startswith("robinhood")
+                          else "base")
+        return StrategySpec(
+            kind="watch", address=mb.group(1), chain=bare_chain, raw_text=text)
 
     # -------- grid (before generic token/side parsing)
     mg = RE_GRID.search(t)

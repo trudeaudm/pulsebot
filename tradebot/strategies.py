@@ -15,9 +15,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .commands import StrategySpec
-from .config import BotConfig
+from .config import BotConfig, TokenConfig
 from .portfolio import Portfolio, Trade
 from .prices import PaperFeed, PriceBook
+from .registry import FetchFn, resolve
 
 if TYPE_CHECKING:
     from .store import Store
@@ -154,16 +155,25 @@ class Strategy:
 class Engine:
     def __init__(self, cfg: BotConfig, book: PriceBook, portfolio: Portfolio,
                  paper_feed: PaperFeed | None, live_clients: dict,
-                 store: Store | None = None) -> None:
+                 store: Store | None = None,
+                 registry_fetch: FetchFn | None = None) -> None:
         self.cfg = cfg
         self.book = book
         self.portfolio = portfolio
         self.paper_feed = paper_feed
         self.live_clients = live_clients   # chain_key -> ChainClient
         self.store = store
+        self.registry_fetch = registry_fetch
         self.strategies: list[Strategy] = []
         self.paused = False
         self.events: list[dict] = []
+        # tokens that shipped in config.yaml — unwatch must never remove these
+        self._config_token_keys: set[tuple[str, str]] = {
+            (ck, sym)
+            for ck, chain in cfg.chains.items()
+            for sym in chain.tokens
+        }
+        self.watched_keys: set[tuple[str, str]] = set()
         if store is not None:
             store.set_on_error(lambda msg: self.log(msg))
 
@@ -185,6 +195,8 @@ class Engine:
 
     def restore(self) -> None:
         """Reload portfolio + strategies from the store (no-op if empty)."""
+        if self.store:
+            self._restore_watched()
         if not self.store or not self.store.has_data():
             self._persist_meta()
             return
@@ -254,6 +266,28 @@ class Engine:
         self.log(f"restored {len(self.portfolio.trades)} trades, "
                  f"{len(self.strategies)} strategies from {self.store.path}")
 
+    def _restore_watched(self) -> None:
+        assert self.store is not None
+        n = 0
+        for row in self.store.load_watched_tokens():
+            chain_key = row["chain"]
+            if chain_key not in self.cfg.chains:
+                continue
+            sym = row["symbol"]
+            if (chain_key, sym) in self._config_token_keys:
+                continue  # config wins
+            tok = TokenConfig(
+                symbol=sym,
+                address=row["address"],
+                dexscreener_pair=row["pair"] or "",
+                decimals=int(row["decimals"] or 18),
+            )
+            self.cfg.chains[chain_key].tokens[sym] = tok
+            self.watched_keys.add((chain_key, sym))
+            n += 1
+        if n:
+            self.log(f"restored {n} watched token(s)")
+
     # ------------------------------------------------------------- intake
 
     def submit(self, spec: StrategySpec) -> Strategy | None:
@@ -276,6 +310,12 @@ class Engine:
             self.paused = False
             self._persist_meta()
             self.log("engine resumed")
+            return None
+        if spec.kind == "watch":
+            self._watch(spec)
+            return None
+        if spec.kind == "unwatch":
+            self._unwatch(spec)
             return None
 
         chain = spec.chain or self.cfg.default_chain
@@ -313,6 +353,98 @@ class Engine:
         self._persist_strategy(s)
         self.log(f"{s.id} accepted: {spec.describe()}")
         return s
+
+    def _fmt_liq(self, usd: float) -> str:
+        if usd >= 1_000_000:
+            return f"${usd / 1e6:.1f}M"
+        if usd >= 1_000:
+            return f"${usd / 1e3:.1f}K"
+        return f"${usd:,.0f}"
+
+    def _unique_symbol(self, chain: str, base: str) -> str:
+        tokens = self.cfg.chains[chain].tokens
+        clean = "".join(c for c in base.upper() if c.isalnum() or c in "_-") or "TOKEN"
+        if clean not in tokens:
+            return clean
+        n = 2
+        while f"{clean}-{n}" in tokens:
+            n += 1
+        return f"{clean}-{n}"
+
+    def _watch(self, spec: StrategySpec) -> None:
+        chain = spec.chain or self.cfg.default_chain
+        if chain not in self.cfg.chains:
+            raise ValueError(f"unknown chain '{chain}'")
+        chain_cfg = self.cfg.chains[chain]
+        if not chain_cfg.dexscreener_slug:
+            raise ValueError(
+                f"{chain} has no dexscreener_slug — can't resolve live prices")
+        addr = (spec.address or "").strip()
+        if not addr:
+            raise ValueError("watch needs a contract address")
+        for existing in chain_cfg.tokens.values():
+            if (existing.address or "").lower() == addr.lower():
+                raise ValueError(
+                    f"already have {existing.symbol} at that address on {chain}")
+        info = resolve(addr, chain_cfg, fetch=self.registry_fetch)
+        sym = self._unique_symbol(chain, info["symbol"])
+        tok = TokenConfig(
+            symbol=sym,
+            address=addr,
+            dexscreener_pair=info["pair_address"],
+            decimals=18,
+        )
+        chain_cfg.tokens[sym] = tok
+        self.watched_keys.add((chain, sym))
+        if info["price_usd"] > 0:
+            self.book.update(chain, sym, info["price_usd"])
+        if self.store:
+            self.store.save_watched_token(
+                chain, sym, addr, info["pair_address"], decimals=18)
+        px = info["price_usd"]
+        liq = info["liquidity_usd"]
+        name = info["name"] or sym
+        dex = info["dex"]
+        msg = (f"watching {sym} ({name}) on {chain} — ${px:g}, "
+               f"{self._fmt_liq(liq)} liquidity on {dex}")
+        if liq < 100_000:
+            msg += " — low liquidity warning"
+            self.log(f"{sym} ({chain}): low liquidity "
+                     f"({self._fmt_liq(liq)})", level="alert")
+        self.log(f"{msg}; decimals unverified — fetched at live-config time")
+        spec.notes = [msg]
+        spec.token = sym
+
+    def _unwatch(self, spec: StrategySpec) -> None:
+        chain = spec.chain or self.cfg.default_chain
+        if chain not in self.cfg.chains:
+            raise ValueError(f"unknown chain '{chain}'")
+        sym = (spec.token or "").upper()
+        if not sym:
+            raise ValueError("unwatch needs a token symbol")
+        if (chain, sym) in self._config_token_keys:
+            raise ValueError(
+                f"{sym} came from config — can't unwatch; remove it from config.yaml")
+        if (chain, sym) not in self.watched_keys:
+            if sym in self.cfg.chains[chain].tokens:
+                raise ValueError(f"{sym} is not a watched token")
+            raise ValueError(f"unknown token '{sym}' on {chain}")
+        for s in self.strategies:
+            if (s.status in ("active", "waiting")
+                    and s.chain == chain and s.spec.token == sym):
+                raise ValueError(
+                    f"can't unwatch {sym}: strategy {s.id} is still {s.status}")
+        qty = self.portfolio.qty(chain, sym)
+        if abs(qty) > 1e-12:
+            raise ValueError(
+                f"can't unwatch {sym}: open position of {qty:g} tokens")
+        del self.cfg.chains[chain].tokens[sym]
+        self.watched_keys.discard((chain, sym))
+        if self.store:
+            self.store.delete_watched_token(chain, sym)
+        msg = f"unwatched {sym} on {chain}"
+        self.log(msg)
+        spec.notes = [msg]
 
     def _note_grid_cancel(self, s: Strategy) -> None:
         if s.spec.kind != "grid" or not s.grid_lots:

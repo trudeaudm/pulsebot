@@ -66,6 +66,14 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS watched_tokens (
+    chain TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    address TEXT NOT NULL,
+    pair TEXT NOT NULL DEFAULT '',
+    decimals INTEGER NOT NULL DEFAULT 18,
+    PRIMARY KEY (chain, symbol)
+);
 """
 
 
@@ -134,6 +142,12 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE strategies ADD COLUMN grid_lots_json TEXT NOT NULL DEFAULT '{}'"
             )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS watched_tokens ("
+            "chain TEXT NOT NULL, symbol TEXT NOT NULL, address TEXT NOT NULL, "
+            "pair TEXT NOT NULL DEFAULT '', decimals INTEGER NOT NULL DEFAULT 18, "
+            "PRIMARY KEY (chain, symbol))"
+        )
 
     def close(self) -> None:
         try:
@@ -315,3 +329,44 @@ class Store:
         except Exception as e:
             self._err(e)
             return 0
+
+    # ------------------------------------------------------------- watched tokens
+
+    def save_watched_token(self, chain: str, symbol: str, address: str,
+                           pair: str, decimals: int = 18) -> None:
+        def go() -> None:
+            self._conn.execute(
+                "INSERT INTO watched_tokens(chain, symbol, address, pair, decimals) "
+                "VALUES(?,?,?,?,?) "
+                "ON CONFLICT(chain, symbol) DO UPDATE SET "
+                "address=excluded.address, pair=excluded.pair, "
+                "decimals=excluded.decimals",
+                (chain, symbol, address, pair, decimals),
+            )
+            self._conn.commit()
+        self._safe(go)
+
+    def delete_watched_token(self, chain: str, symbol: str) -> None:
+        def go() -> None:
+            self._conn.execute(
+                "DELETE FROM watched_tokens WHERE chain=? AND symbol=?",
+                (chain, symbol),
+            )
+            self._conn.commit()
+        self._safe(go)
+
+    def load_watched_tokens(self) -> list[dict]:
+        try:
+            rows = self._conn.execute(
+                "SELECT chain, symbol, address, pair, decimals "
+                "FROM watched_tokens ORDER BY chain, symbol"
+            ).fetchall()
+            return [
+                {"chain": r["chain"], "symbol": r["symbol"],
+                 "address": r["address"], "pair": r["pair"],
+                 "decimals": int(r["decimals"])}
+                for r in rows
+            ]
+        except Exception as e:
+            self._err(e)
+            return []
