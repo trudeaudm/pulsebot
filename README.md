@@ -52,6 +52,12 @@ only — never the URL (it may embed an API key). You can still paste a public
 endpoint (`https://mainnet.base.org`, etc.) directly into `rpc_url` as a
 rate-limited fallback.
 
+### Troubleshooting
+
+If Dexscreener/`watch` fails with `CERTIFICATE_VERIFY_FAILED` on Windows
+(AV/proxy TLS interception), Pulse injects the OS trust store via `truststore`;
+set `PULSE_CA_BUNDLE` to your proxy's CA PEM if it still fails.
+
 ### Paper trading against live prices
 
 Keep `mode: paper`, watch a CA (or set the token's `address` / optional

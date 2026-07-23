@@ -770,6 +770,43 @@ def test_cli_parse_port_and_config():
     assert not _is_addr_in_use(ValueError("nope"))
 
 
+def test_pulse_ca_bundle_plumbs_to_httpx():
+    import os
+    from unittest.mock import patch
+
+    from tradebot.httputil import httpx_client_kwargs, with_ssl_hint
+    from tradebot import registry
+
+    os.environ.pop("PULSE_CA_BUNDLE", None)
+    assert "verify" not in httpx_client_kwargs()
+
+    os.environ["PULSE_CA_BUNDLE"] = r"C:\certs\proxy-ca.pem"
+    try:
+        kw = httpx_client_kwargs()
+        assert kw["verify"] == r"C:\certs\proxy-ca.pem"
+        captured: dict = {}
+
+        def fake_get(url, **kwargs):
+            captured.update(kwargs)
+
+            class R:
+                def raise_for_status(self): pass
+                def json(self): return {"pairs": []}
+
+            return R()
+
+        with patch("tradebot.registry.httpx.get", side_effect=fake_get):
+            registry.default_fetch("https://example.test/")
+        assert captured.get("verify") == r"C:\certs\proxy-ca.pem"
+    finally:
+        os.environ.pop("PULSE_CA_BUNDLE", None)
+
+    hint = with_ssl_hint(
+        "Dexscreener request failed: CERTIFICATE_VERIFY_FAILED",
+        Exception("CERTIFICATE_VERIFY_FAILED"))
+    assert "PULSE_CA_BUNDLE" in hint and "truststore" in hint
+
+
 def test_encode_v3_path_and_plan_route():
     from tradebot.chains import encode_v3_path, plan_route
     from tradebot.config import ChainConfig, TokenConfig

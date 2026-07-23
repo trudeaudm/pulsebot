@@ -106,6 +106,14 @@ def load_dotenv(path: str | Path | None = None) -> None:
         os.environ[key] = val
 
 
+_trust_store_warning: str | None = None
+
+
+def trust_store_warning() -> str | None:
+    """Last inject_os_trust_store warning (if any), for the engine log."""
+    return _trust_store_warning
+
+
 def _expand_env(value: str, *, mode: str, required_in_live: bool = False) -> str:
     """Expand ${VAR} placeholders. Live mode fails if a required var is unset."""
     if not isinstance(value, str) or "${" not in value:
@@ -142,7 +150,11 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 def load_config(path: str | None = None, *, dotenv_path: str | Path | None = None
                 ) -> BotConfig:
+    global _trust_store_warning
     load_dotenv(dotenv_path)
+    # Before any outbound HTTPS (Dexscreener / registry): prefer OS trust store.
+    from .httputil import inject_os_trust_store
+    _trust_store_warning = inject_os_trust_store()
 
     cfg_path: Path | None = None
     if path:

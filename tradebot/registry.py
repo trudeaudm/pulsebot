@@ -9,6 +9,7 @@ from typing import Callable
 import httpx
 
 from .config import ChainConfig
+from .httputil import httpx_client_kwargs, with_ssl_hint
 
 FetchFn = Callable[[str], dict]
 
@@ -17,11 +18,12 @@ DEX_TOKENS = "https://api.dexscreener.com/latest/dex/tokens/{address}"
 
 def default_fetch(url: str) -> dict:
     try:
-        r = httpx.get(url, timeout=10)
+        r = httpx.get(url, **httpx_client_kwargs())
         r.raise_for_status()
         return r.json()
     except httpx.HTTPError as e:
-        raise ValueError(f"Dexscreener request failed: {e}") from e
+        raise ValueError(with_ssl_hint(
+            f"Dexscreener request failed: {e}", e)) from e
 
 
 def resolve(address: str, chain: ChainConfig,
@@ -40,10 +42,11 @@ def resolve(address: str, chain: ChainConfig,
     fetch = fetch or default_fetch
     try:
         data = fetch(DEX_TOKENS.format(address=addr))
-    except ValueError:
-        raise
+    except ValueError as e:
+        raise ValueError(with_ssl_hint(str(e), e)) from e
     except Exception as e:
-        raise ValueError(f"Dexscreener lookup failed: {e}") from e
+        raise ValueError(with_ssl_hint(
+            f"Dexscreener lookup failed: {e}", e)) from e
     if not isinstance(data, dict):
         raise ValueError("Dexscreener returned unexpected payload")
     pairs = data.get("pairs") or []

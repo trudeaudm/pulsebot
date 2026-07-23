@@ -117,7 +117,8 @@ class DexscreenerFeed:
         self.cfg = cfg
 
     async def run(self) -> None:
-        async with httpx.AsyncClient(timeout=10) as client:
+        from .httputil import httpx_client_kwargs
+        async with httpx.AsyncClient(**httpx_client_kwargs()) as client:
             while True:
                 for chain_key, chain in self.cfg.chains.items():
                     slug = chain.dexscreener_slug

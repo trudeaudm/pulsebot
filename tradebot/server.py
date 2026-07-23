@@ -74,6 +74,11 @@ def build_app(config_path: str | None = None) -> FastAPI:
     store = Store(cfg.db_path)
     engine = Engine(cfg, book, portfolio, paper_feed, live_clients, store=store)
     engine.restore()
+    from .config import trust_store_warning
+    warn = trust_store_warning()
+    if warn:
+        engine.log(warn, level="error")
+        print(f"  warning: {warn}")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
