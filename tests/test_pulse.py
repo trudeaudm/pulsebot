@@ -629,6 +629,33 @@ def test_grid_no_buy_at_top_level():
     assert buys == 0
 
 
+def test_event_levels():
+    eng, book, pf = _engine()
+    book.update("base", "TOKENA", 0.12)
+    # trigger fire → alert
+    s = eng.submit(parse_command(
+        "Buy $50 of TokenA if the price goes below $0.1"))
+    eng.tick()
+    book.update("base", "TOKENA", 0.09)
+    eng.tick()
+    assert any(e["level"] == "alert" and "trigger hit" in e["msg"] for e in eng.events)
+
+    # risk block → error
+    eng.cfg.risk = RiskConfig(max_daily_spend_usd=10)
+    eng.submit(parse_command("buy $50 of TOKENA"))
+    eng.tick()
+    assert any(e["level"] == "error" and "blocked" in e["msg"] for e in eng.events)
+
+    # strategy error → error (force insufficient cash on a market buy after draining)
+    eng2, book2, pf2 = _engine()
+    book2.update("base", "TOKENA", 0.10)
+    pf2.cash_usd = 1.0
+    s2 = eng2.submit(parse_command("buy $500 of TOKENA"))
+    eng2.tick()
+    assert s2.status == "error"
+    assert any(e["level"] == "error" and s2.id in e["msg"] for e in eng2.events)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

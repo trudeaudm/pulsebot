@@ -56,9 +56,26 @@ The `while price …` gate freezes accrual whenever the condition is false.
 
 A grid places evenly spaced price levels between a lower and upper bound.
 Crossing a level downward buys `$X` at that level (if no lot is held there);
-crossing the next level up sells that lot. Inventory is tracked per level,
-survives restarts, and the strategy runs until you cancel it (lots are left
-untouched on cancel). Risk caps apply to grid orders like any other fill.
+crossing the next level up sells that lot. The top level is sell-only (no buys).
+Inventory is tracked per level, survives restarts, and the strategy runs until
+you cancel it (lots are left untouched on cancel). Risk caps apply to grid
+orders like any other fill.
+
+### Command bar
+
+ArrowUp / ArrowDown recall the last 50 successfully parsed commands (session
+only). While typing, Tab (or ArrowRight at the end of the line) accepts a
+ghost completion for configured token symbols and verbs
+(`buy` / `sell` / `grid` / `trailing` / `cancel` / `pause` / `resume`).
+Escape dismisses the ghost.
+
+### Alerts
+
+Trigger fires, trailing-stop fires, cap completions, and grid sells emit
+`alert`-level engine events; risk blocks and strategy errors emit `error`.
+After you submit your first command, the dashboard may ask for notification
+permission and will flash the engine log (and notify, if allowed) on new
+alert/error events.
 
 Set `anthropic_parser: true` (plus `ANTHROPIC_API_KEY`) and any phrasing the
 grammar can't match is parsed by the Claude API into the same schema.

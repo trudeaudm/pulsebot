@@ -391,8 +391,8 @@ class Engine:
             })
         return out
 
-    def log(self, msg: str) -> None:
-        self.events.append({"ts": time.time(), "msg": msg})
+    def log(self, msg: str, level: str = "info") -> None:
+        self.events.append({"ts": time.time(), "msg": msg, "level": level})
         if len(self.events) > 400:
             del self.events[:100]
 
@@ -403,7 +403,7 @@ class Engine:
             try:
                 self.tick()
             except Exception as e:  # engine must never die
-                self.log(f"engine error: {e}")
+                self.log(f"engine error: {e}", level="error")
             self.portfolio.mark(self.book.price)
             self._persist_equity()
             await asyncio.sleep(self.cfg.tick_seconds)
@@ -434,7 +434,7 @@ class Engine:
                 s.status = "error"
                 s.error = str(e)
                 self._persist_strategy(s)
-                self.log(f"{s.id} error: {e}")
+                self.log(f"{s.id} error: {e}", level="error")
 
     def _tick_strategy(self, s: Strategy, price: float, dt: float) -> None:
         spec = s.spec
@@ -454,7 +454,7 @@ class Engine:
             if spec.trigger and spec.trigger.check(price):
                 if self._fill_market(s, price):
                     s.status = "done"
-                    self.log(f"{s.id} stop fired at ${price:.6f}")
+                    self.log(f"{s.id} stop fired at ${price:.6f}", level="alert")
             return
 
         if spec.kind == "trailing_stop":
@@ -467,7 +467,7 @@ class Engine:
                 if self._fill_market(s, price):
                     s.status = "done"
                     self.log(f"{s.id} trailing stop fired at ${price:.6f} "
-                             f"(peak ${s.peak_price:.6f})")
+                             f"(peak ${s.peak_price:.6f})", level="alert")
             return
 
         if spec.kind == "grid":
@@ -478,7 +478,7 @@ class Engine:
             if spec.trigger and spec.trigger.check(price):
                 s.phase = "streaming"
                 s.status = "active"
-                self.log(f"{s.id} trigger hit at ${price:.6f}")
+                self.log(f"{s.id} trigger hit at ${price:.6f}", level="alert")
             else:
                 return
 
@@ -507,7 +507,7 @@ class Engine:
                     s.accrued_usd = min(s.accrued_usd, slice_usd)
             if cap and s.spent_usd >= cap - 1e-9:
                 s.status = "done"
-                self.log(f"{s.id} completed cap of ${cap:g}")
+                self.log(f"{s.id} completed cap of ${cap:g}", level="alert")
 
     def _tick_grid(self, s: Strategy, price: float) -> None:
         spec = s.spec
@@ -539,7 +539,8 @@ class Engine:
                     lot = s.grid_lots[j - 1]
                     if self._grid_sell(s, float(lot["qty"]), price):
                         del s.grid_lots[j - 1]
-                        self.log(f"{s.id} grid sell L{j - 1}→L{j} @ ${lv:g}")
+                        self.log(f"{s.id} grid sell L{j - 1}→L{j} @ ${lv:g}",
+                                 level="alert")
 
         s.prev_price = price
 
@@ -607,7 +608,7 @@ class Engine:
         s.blocked_reason = reason
         now = time.time()
         if now - s._last_block_log >= 60.0:
-            self.log(f"{s.id} blocked: {reason}")
+            self.log(f"{s.id} blocked: {reason}", level="error")
             s._last_block_log = now
         self._persist_strategy(s)
 

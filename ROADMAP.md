@@ -26,6 +26,6 @@ Each item should land with tests and a README update per `.cursor/rules/pulse.md
    the same spec.
 
 ## P4 — interface
-10. **Command history & autocomplete** — up-arrow recall, token symbol completion.
-11. **Alerts** — browser notification on trigger fire / cap complete / error.
+10. **Command history & autocomplete** (done) — up-arrow recall, token symbol completion.
+11. **Alerts** (done) — browser notification on trigger fire / cap complete / error.
 12. **Mobile pass** — cards and detail overlay audited below 420px.
