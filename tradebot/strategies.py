@@ -519,9 +519,10 @@ class Engine:
         lo, hi = spec.grid_lower, spec.grid_upper
         in_band = lo - 1e-12 <= price <= hi + 1e-12
 
-        # DOWNWARD crossings: highest level first
+        # DOWNWARD crossings: highest buyable level first (skip top — sell-only)
         if price < prev:
-            for i in range(len(levels) - 1, -1, -1):
+            top = len(levels) - 1
+            for i in range(top - 1, -1, -1):
                 lv = levels[i]
                 if prev > lv >= price and i not in s.grid_lots and in_band:
                     if self._grid_buy(s, spec.usd_per_level, price):
@@ -539,13 +540,6 @@ class Engine:
                     if self._grid_sell(s, float(lot["qty"]), price):
                         del s.grid_lots[j - 1]
                         self.log(f"{s.id} grid sell L{j - 1}→L{j} @ ${lv:g}")
-            # Lot at the uppermost level sells when price crosses back up through it
-            top = len(levels) - 1
-            if top >= 0 and top in s.grid_lots and prev < levels[top] <= price:
-                lot = s.grid_lots[top]
-                if self._grid_sell(s, float(lot["qty"]), price):
-                    del s.grid_lots[top]
-                    self.log(f"{s.id} grid sell L{top} @ ${levels[top]:g} (upper)")
 
         s.prev_price = price
 

@@ -521,18 +521,18 @@ def test_grid_engine(tmp_path=None):
     eng.tick()  # anchor at 0.15
     assert g.prev_price == 0.15 and len(g.grid_lots) == 0
 
-    # (a) downward sweep buys 3 lots, no duplicates on further ticks below
+    # (a) downward sweep buys lots on all but the top level
     book.update("base", "TOKENA", 0.10)  # still in-band; crosses 0.14, 0.12, 0.10
     eng.tick()
-    assert len(g.grid_lots) == 3
-    assert set(g.grid_lots) == {0, 1, 2}
+    assert len(g.grid_lots) == 2  # L0, L1 only — top is sell-only
+    assert set(g.grid_lots) == {0, 1}
     buys = sum(1 for t in pf.trades if t.side == "buy" and t.strategy_id == g.id)
-    assert buys == 3
+    assert buys == 2
     book.update("base", "TOKENA", 0.08)  # outside band — no new buys
     eng.tick()
-    assert len(g.grid_lots) == 3
+    assert len(g.grid_lots) == 2
     buys2 = sum(1 for t in pf.trades if t.side == "buy" and t.strategy_id == g.id)
-    assert buys2 == 3
+    assert buys2 == 2
 
     # (c) price wandering outside the band does nothing after exiting
     book.update("base", "TOKENA", 0.20)
@@ -579,7 +579,7 @@ def test_grid_engine(tmp_path=None):
     eng.tick()
     book.update("base", "TOKENA", 0.10)
     eng.tick()
-    assert len(g.grid_lots) == 3
+    assert len(g.grid_lots) == 2
     sid, lots = g.id, dict(g.grid_lots)
     fills_before = g.fills
     store.close()
@@ -587,11 +587,11 @@ def test_grid_engine(tmp_path=None):
     eng2, book2, pf2, store2 = _engine_with_store(db)
     book2.update("base", "TOKENA", 0.10)
     r = eng2.find(sid)
-    assert r is not None and len(r.grid_lots) == 3
+    assert r is not None and len(r.grid_lots) == 2
     assert r.prev_price == 0.0
     eng2.tick()  # re-anchor only
     assert r.fills == fills_before
-    assert len(r.grid_lots) == 3
+    assert len(r.grid_lots) == 2
     assert abs(r.prev_price - 0.10) < 1e-12
     store2.close()
 
@@ -608,6 +608,25 @@ def test_grid_engine(tmp_path=None):
     # first buy of $50 would exceed $40 daily cap → all buys blocked, no lots
     assert len(g.grid_lots) == 0
     assert g.blocked_reason and "daily spend" in g.blocked_reason
+
+
+def test_grid_no_buy_at_top_level():
+    """Oscillation tightly around the upper bound must not buy the top line."""
+    eng, book, pf = _engine()
+    eng.cfg.min_slice_usd = 5
+    # 3 levels: 0.10, 0.12, 0.14 — top is sell-only
+    book.update("base", "TOKENA", 0.145)
+    g = eng.submit(parse_command(
+        "grid TOKENA between $0.10 and $0.14 with 3 levels, $50 per level"))
+    eng.tick()
+    for _ in range(8):
+        book.update("base", "TOKENA", 0.135)  # cross down through 0.14
+        eng.tick()
+        book.update("base", "TOKENA", 0.145)  # cross back up through 0.14
+        eng.tick()
+    assert len(g.grid_lots) == 0
+    buys = sum(1 for t in pf.trades if t.side == "buy" and t.strategy_id == g.id)
+    assert buys == 0
 
 
 if __name__ == "__main__":
