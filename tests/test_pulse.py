@@ -657,6 +657,84 @@ def test_event_levels():
     assert any(e["level"] == "error" and s2.id in e["msg"] for e in eng2.events)
 
 
+def test_dotenv_and_rpc_interpolation():
+    import os
+    import tempfile
+    from tradebot.config import describe_rpc_sources, load_config, load_dotenv
+
+    root = Path(tempfile.mkdtemp())
+    envf = root / ".env"
+    envf.write_text(
+        "# comment\n\n"
+        "QUOTED=\"hello world\"\n"
+        "SINGLE='xyz'\n"
+        "export EXPORTED=yes\n"
+        "PRESET=fromfile\n"
+        "PULSE_BASE_RPC=https://example.invalid/from-dotenv\n",
+        encoding="utf-8",
+    )
+    for k in ("QUOTED", "SINGLE", "EXPORTED", "PULSE_BASE_RPC",
+              "PULSE_ROBINHOOD_RPC", "PULSE_TEST_RPC"):
+        os.environ.pop(k, None)
+    os.environ["PRESET"] = "fromenv"
+    load_dotenv(envf)
+    assert os.environ["QUOTED"] == "hello world"
+    assert os.environ["SINGLE"] == "xyz"
+    assert os.environ["EXPORTED"] == "yes"
+    assert os.environ["PRESET"] == "fromenv"  # existing env wins
+
+    yaml_path = root / "cfg.yaml"
+    yaml_path.write_text(
+        "bot:\n  mode: paper\n"
+        "chains:\n  base:\n    name: Base\n    chain_id: 8453\n"
+        "    rpc_url: ${PULSE_BASE_RPC}\n    tokens: []\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(str(yaml_path), dotenv_path=envf)
+    assert cfg.chains["base"].rpc_url == "https://example.invalid/from-dotenv"
+    assert cfg.chains["base"].rpc_env_var == "PULSE_BASE_RPC"
+    src = "\n".join(describe_rpc_sources(cfg))
+    assert "PULSE_BASE_RPC" in src
+    assert "example.invalid" not in src  # never echo the URL
+
+    os.environ["PULSE_TEST_RPC"] = "https://example.invalid/from-env"
+    yaml2 = root / "cfg2.yaml"
+    yaml2.write_text(
+        "bot:\n  mode: paper\n"
+        "chains:\n  base:\n    name: Base\n    chain_id: 8453\n"
+        "    rpc_url: ${PULSE_TEST_RPC}\n    tokens: []\n",
+        encoding="utf-8",
+    )
+    cfg2 = load_config(str(yaml2), dotenv_path=root / "missing.env")
+    assert cfg2.chains["base"].rpc_url == "https://example.invalid/from-env"
+
+    # live mode: missing var → clear error naming the variable
+    os.environ.pop("PULSE_MISSING_RPC", None)
+    live_yaml = root / "live.yaml"
+    live_yaml.write_text(
+        "bot:\n  mode: live\n"
+        "chains:\n  base:\n    name: Base\n    chain_id: 8453\n"
+        "    rpc_url: ${PULSE_MISSING_RPC}\n    tokens: []\n",
+        encoding="utf-8",
+    )
+    try:
+        load_config(str(live_yaml), dotenv_path=root / "missing.env")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "PULSE_MISSING_RPC" in str(e)
+        assert "live mode" in str(e).lower()
+
+    # paper mode boots with everything unset (example config)
+    for k in ("PULSE_BASE_RPC", "PULSE_ROBINHOOD_RPC"):
+        os.environ.pop(k, None)
+    paper = load_config("config.example.yaml",
+                        dotenv_path=root / "missing.env")
+    assert paper.mode == "paper"
+    assert paper.chains["base"].rpc_url == ""
+    assert paper.chains["robinhood"].rpc_url == ""
+    assert paper.chains["base"].rpc_env_var == "PULSE_BASE_RPC"
+
+
 # ----- watch any CA -------------------------------------------------------
 
 _WATCH_ADDR = "0x4ed4e862860bed51a9570b96d89af5e1b0efefed"

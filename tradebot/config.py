@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 import yaml
 
 DEFAULT_CONFIG_PATHS = ["config.yaml", "config.example.yaml"]
+_ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 @dataclass
@@ -34,6 +36,8 @@ class ChainConfig:
     quote_symbol: str = "USDC"
     quote_decimals: int = 6
     dexscreener_slug: str = ""    # dexscreener chain slug, e.g. "base"
+    # Variable name if rpc_url was ${VAR}; never log the URL (may embed API keys).
+    rpc_env_var: str = ""
     tokens: dict[str, TokenConfig] = field(default_factory=dict)
 
 
@@ -67,12 +71,74 @@ class BotConfig:
         return os.environ.get(self.private_key_env)
 
 
+def load_dotenv(path: str | Path | None = None) -> None:
+    """Load KEY=VALUE pairs from .env into os.environ if not already set.
+
+    Real environment variables always win. No dependency — stdlib only.
+    """
+    p = Path(path) if path is not None else Path(".env")
+    if not p.is_file():
+        return
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        os.environ[key] = val
+
+
+def _expand_env(value: str, *, mode: str, required_in_live: bool = False) -> str:
+    """Expand ${VAR} placeholders. Live mode fails if a required var is unset."""
+    if not isinstance(value, str) or "${" not in value:
+        return value
+
+    missing: list[str] = []
+
+    def repl(m: re.Match[str]) -> str:
+        name = m.group(1)
+        if name in os.environ:
+            return os.environ[name]
+        missing.append(name)
+        return ""
+
+    out = _ENV_VAR_RE.sub(repl, value)
+    if missing and mode == "live" and required_in_live:
+        names = ", ".join(dict.fromkeys(missing))
+        raise ValueError(
+            f"live mode requires environment variable(s) {names} "
+            f"(set in .env or the process environment)")
+    return out
+
+
+def _rpc_env_var_name(raw: str) -> str:
+    """If rpc_url is exactly ${VAR}, return VAR; else empty."""
+    m = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", (raw or "").strip())
+    return m.group(1) if m else ""
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     with open(path) as f:
         return yaml.safe_load(f) or {}
 
 
-def load_config(path: str | None = None) -> BotConfig:
+def load_config(path: str | None = None, *, dotenv_path: str | Path | None = None
+                ) -> BotConfig:
+    load_dotenv(dotenv_path)
+
     cfg_path: Path | None = None
     if path:
         cfg_path = Path(path)
@@ -82,6 +148,9 @@ def load_config(path: str | None = None) -> BotConfig:
                 cfg_path = Path(candidate)
                 break
     raw = _load_yaml(cfg_path) if cfg_path else {}
+
+    bot = raw.get("bot") or {}
+    mode = str(bot.get("mode", "paper")).lower()
 
     chains: dict[str, ChainConfig] = {}
     for key, c in (raw.get("chains") or {}).items():
@@ -97,10 +166,13 @@ def load_config(path: str | None = None) -> BotConfig:
             )
             for t in (c.get("tokens") or [])
         }
+        rpc_raw = c.get("rpc_url", "") or ""
+        rpc_var = _rpc_env_var_name(rpc_raw)
+        rpc_url = _expand_env(rpc_raw, mode=mode, required_in_live=True)
         chains[key] = ChainConfig(
             name=c.get("name", key),
             chain_id=int(c["chain_id"]),
-            rpc_url=c.get("rpc_url", ""),
+            rpc_url=rpc_url,
             explorer=c.get("explorer", ""),
             router=c.get("router", ""),
             quoter=c.get("quoter", ""),
@@ -108,10 +180,10 @@ def load_config(path: str | None = None) -> BotConfig:
             quote_symbol=c.get("quote_symbol", "USDC"),
             quote_decimals=int(c.get("quote_decimals", 6)),
             dexscreener_slug=c.get("dexscreener_slug", ""),
+            rpc_env_var=rpc_var,
             tokens=tokens,
         )
 
-    bot = raw.get("bot") or {}
     risk_raw = bot.get("risk") or {}
     risk = RiskConfig(
         max_open_notional_usd_per_token=float(
@@ -121,7 +193,7 @@ def load_config(path: str | None = None) -> BotConfig:
             risk_raw.get("default_cap_usd_for_uncapped", 0) or 0),
     )
     return BotConfig(
-        mode=bot.get("mode", "paper"),
+        mode=mode,
         default_chain=bot.get("default_chain", next(iter(chains), "base")),
         tick_seconds=float(bot.get("tick_seconds", 1.0)),
         min_slice_usd=float(bot.get("min_slice_usd", 10.0)),
@@ -137,3 +209,19 @@ def load_config(path: str | None = None) -> BotConfig:
         risk=risk,
         chains=chains,
     )
+
+
+def describe_rpc_sources(cfg: BotConfig) -> list[str]:
+    """Startup lines naming env vars only — never the RPC URL itself."""
+    lines = []
+    for key, chain in cfg.chains.items():
+        if chain.rpc_env_var:
+            if chain.rpc_url:
+                lines.append(f"{key} RPC: from ${{{chain.rpc_env_var}}}")
+            else:
+                lines.append(f"{key} RPC: ${{{chain.rpc_env_var}}} unset (empty)")
+        elif chain.rpc_url:
+            lines.append(f"{key} RPC: literal in config")
+        else:
+            lines.append(f"{key} RPC: empty")
+    return lines

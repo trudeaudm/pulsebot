@@ -5,7 +5,7 @@ import sys
 
 import uvicorn
 
-from .config import load_config
+from .config import describe_rpc_sources, load_config
 from .server import build_app
 from .store import archive_db
 
@@ -26,7 +26,10 @@ def main() -> None:
     banner = "PAPER (simulated fills)" if cfg.mode == "paper" else "LIVE — real funds"
     print(f"\n  Pulse trading engine · mode: {banner}")
     print(f"  Dashboard: http://{cfg.host}:{cfg.port}")
-    print(f"  Database:  {cfg.db_path}\n")
+    print(f"  Database:  {cfg.db_path}")
+    for line in describe_rpc_sources(cfg):
+        print(f"  {line}")
+    print()
     uvicorn.run(app, host=cfg.host, port=cfg.port, log_level="warning")
 
 

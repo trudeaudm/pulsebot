@@ -24,7 +24,9 @@ chains:
   base:
     name: Base
     chain_id: 8453
-    rpc_url: https://mainnet.base.org          # use a dedicated RPC (Alchemy/QuickNode) for real speed
+    # Prefer Alchemy/QuickNode via .env — public endpoints work as a paste-in
+    # fallback (https://mainnet.base.org) but are rate-limited.
+    rpc_url: ${PULSE_BASE_RPC}
     explorer: https://basescan.org
     dexscreener_slug: base                     # enables live price feed even in paper mode if you set addresses
     # Uniswap v3 on Base:
@@ -45,7 +47,9 @@ chains:
   robinhood:
     name: Robinhood Chain
     chain_id: 4663
-    rpc_url: https://rpc.mainnet.chain.robinhood.com   # public endpoint is rate-limited; use a provider for speed
+    # Prefer a provider URL via .env — public fallback
+    # https://rpc.mainnet.chain.robinhood.com is rate-limited.
+    rpc_url: ${PULSE_ROBINHOOD_RPC}
     explorer: https://robinhoodchain.blockscout.com
     dexscreener_slug: ""        # set when Dexscreener indexes your pair's chain slug
     # Fill these with the router/quoter of the DEX you trade on Robinhood Chain

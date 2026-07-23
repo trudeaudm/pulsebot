@@ -29,6 +29,24 @@ Paper mode runs a mean-reverting price simulator per token, fills against it
 with a fee + size-impact model, and your fills push the simulated price — so
 you can rehearse trigger/rate strategies realistically before risking anything.
 
+### Secrets & RPCs
+
+Copy `.env.example` to `.env` and fill in Alchemy (or similar) HTTPS URLs and,
+for live mode, your hot-wallet key:
+
+```bash
+cp .env.example .env
+# edit .env — PULSE_BASE_RPC, PULSE_ROBINHOOD_RPC, PULSE_PRIVATE_KEY, …
+```
+
+`config.example.yaml` references `${PULSE_BASE_RPC}` / `${PULSE_ROBINHOOD_RPC}`.
+Pulse loads `.env` at startup (real environment variables always win) and
+expands those placeholders. Paper mode tolerates empty RPCs; live mode refuses
+to start if a referenced variable is missing. Startup logs name the env var
+only — never the URL (it may embed an API key). You can still paste a public
+endpoint (`https://mainnet.base.org`, etc.) directly into `rpc_url` as a
+rate-limited fallback.
+
 ### Paper trading against live prices
 
 Keep `mode: paper`, set the token's `address` (and optionally `dexscreener_pair`)
