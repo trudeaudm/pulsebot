@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from .commands import ParseError, parse_command, parse_with_claude
 from .config import BotConfig, load_config
 from .portfolio import Portfolio
-from .prices import DexscreenerFeed, PaperFeed, PriceBook
+from .prices import DexscreenerFeed, PaperFeed, PriceBook, has_live_price_source
 from .store import Store
 from .strategies import Engine
 
@@ -22,6 +22,33 @@ STATIC = Path(__file__).parent / "static"
 
 class CommandIn(BaseModel):
     text: str
+
+
+def _wire_paper_feed(paper_feed: PaperFeed, cfg: BotConfig) -> None:
+    """Register only simulated tokens; live-sourced ones stay on Dexscreener."""
+    for chain_key, chain in cfg.chains.items():
+        for tok in chain.tokens.values():
+            if has_live_price_source(tok, chain):
+                print(f"{tok.symbol} ({chain_key}): live via dexscreener")
+            else:
+                paper_feed.register(chain_key, tok)
+                print(f"{tok.symbol} ({chain_key}): simulated")
+
+
+async def _warn_missing_live_prices(engine: Engine, book: PriceBook,
+                                    cfg: BotConfig) -> None:
+    """One-time error events for live-sourced tokens that never got a quote."""
+    await asyncio.sleep(30.0)
+    for chain_key, chain in cfg.chains.items():
+        for tok in chain.tokens.values():
+            if not has_live_price_source(tok, chain):
+                continue
+            if book.price(chain_key, tok.symbol) is None:
+                engine.log(
+                    f"{tok.symbol} ({chain_key}): no live price after 30s — "
+                    f"check address or dexscreener_pair",
+                    level="error",
+                )
 
 
 def build_app(config_path: str | None = None) -> FastAPI:
@@ -33,9 +60,7 @@ def build_app(config_path: str | None = None) -> FastAPI:
     live_clients: dict = {}
     if cfg.mode == "paper":
         paper_feed = PaperFeed(book, cfg)
-        for chain_key, chain in cfg.chains.items():
-            for tok in chain.tokens.values():
-                paper_feed.register(chain_key, tok)
+        _wire_paper_feed(paper_feed, cfg)
     else:
         from .chains import ChainClient
         for chain_key, chain in cfg.chains.items():
@@ -56,6 +81,11 @@ def build_app(config_path: str | None = None) -> FastAPI:
             tasks.append(asyncio.create_task(paper_feed.run()))
         if any(c.dexscreener_slug for c in cfg.chains.values()):
             tasks.append(asyncio.create_task(DexscreenerFeed(book, cfg).run()))
+        if any(has_live_price_source(tok, chain)
+               for chain in cfg.chains.values()
+               for tok in chain.tokens.values()):
+            tasks.append(asyncio.create_task(
+                _warn_missing_live_prices(engine, book, cfg)))
         yield
         for t in tasks:
             t.cancel()

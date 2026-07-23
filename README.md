@@ -29,6 +29,16 @@ Paper mode runs a mean-reverting price simulator per token, fills against it
 with a fee + size-impact model, and your fills push the simulated price — so
 you can rehearse trigger/rate strategies realistically before risking anything.
 
+### Paper trading against live prices
+
+Keep `mode: paper`, set the token's `address` (and optionally `dexscreener_pair`)
+under a chain that has `dexscreener_slug`, and leave everything else as-is.
+That token is priced only from Dexscreener — the simulator never writes it —
+while fills stay simulated (fee + impact on the fill price, no feed nudge).
+Tokens without a usable live source keep the GBM simulator. At boot each token
+logs `simulated` or `live via dexscreener`; a live-sourced token with no quote
+after 30s emits an engine error naming the token (bad address or unindexed pair).
+
 ## Command grammar
 
 | You type | It becomes |

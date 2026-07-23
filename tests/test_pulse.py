@@ -7,7 +7,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from tradebot.commands import parse_command
 from tradebot.config import BotConfig, ChainConfig, RiskConfig, TokenConfig
 from tradebot.portfolio import Portfolio
-from tradebot.prices import PriceBook
+from tradebot.prices import PaperFeed, PriceBook, has_live_price_source
+from tradebot.server import _wire_paper_feed
 from tradebot.strategies import Engine
 
 
@@ -654,6 +655,59 @@ def test_event_levels():
     eng2.tick()
     assert s2.status == "error"
     assert any(e["level"] == "error" and s2.id in e["msg"] for e in eng2.events)
+
+
+def test_paper_feed_defers_to_live_source():
+    """Address+slug → Dexscreener only; slugless (even with address) stays simulated."""
+    cfg = BotConfig(chains={
+        "base": ChainConfig(
+            name="Base", chain_id=8453, rpc_url="",
+            dexscreener_slug="base",
+            tokens={
+                "LIVE": TokenConfig(symbol="LIVE", address="0xabc"),
+                "PAIR": TokenConfig(symbol="PAIR", dexscreener_pair="0xpair"),
+                "SIM": TokenConfig(symbol="SIM"),
+            },
+        ),
+        "robinhood": ChainConfig(
+            name="RH", chain_id=4663, rpc_url="",
+            dexscreener_slug="",
+            tokens={
+                "ADDR": TokenConfig(symbol="ADDR", address="0xdef"),
+            },
+        ),
+    })
+    assert has_live_price_source(cfg.chains["base"].tokens["LIVE"], cfg.chains["base"])
+    assert has_live_price_source(cfg.chains["base"].tokens["PAIR"], cfg.chains["base"])
+    assert not has_live_price_source(cfg.chains["base"].tokens["SIM"], cfg.chains["base"])
+    assert not has_live_price_source(
+        cfg.chains["robinhood"].tokens["ADDR"], cfg.chains["robinhood"])
+
+    book = PriceBook()
+    feed = PaperFeed(book, cfg)
+    _wire_paper_feed(feed, cfg)
+    assert ("base", "LIVE") not in feed._state
+    assert ("base", "PAIR") not in feed._state
+    assert ("base", "SIM") in feed._state
+    assert ("robinhood", "ADDR") in feed._state
+    assert book.price("base", "LIVE") is None
+    assert book.price("base", "SIM") is not None
+
+
+def test_apply_impact_unregistered_noop():
+    cfg = BotConfig(chains={"base": ChainConfig(
+        name="Base", chain_id=8453, rpc_url="",
+        tokens={"TOKENA": TokenConfig(symbol="TOKENA")})})
+    book = PriceBook()
+    feed = PaperFeed(book, cfg)
+    # never registered — must not crash or invent state
+    feed.apply_impact("base", "NOSUCH", 50)
+    assert ("base", "NOSUCH") not in feed._state
+    assert book.price("base", "NOSUCH") is None
+    feed.register("base", cfg.chains["base"].tokens["TOKENA"])
+    before = book.price("base", "TOKENA")
+    feed.apply_impact("base", "TOKENA", 100)  # +1%
+    assert abs(book.price("base", "TOKENA") - before * 1.01) < 1e-12
 
 
 if __name__ == "__main__":

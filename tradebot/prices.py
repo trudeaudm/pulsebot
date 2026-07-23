@@ -17,7 +17,12 @@ from collections import deque
 
 import httpx
 
-from .config import BotConfig, TokenConfig
+from .config import BotConfig, ChainConfig, TokenConfig
+
+
+def has_live_price_source(tok: TokenConfig, chain: ChainConfig) -> bool:
+    """True when Dexscreener can price this token (slug + address or pair)."""
+    return bool(chain.dexscreener_slug and (tok.address or tok.dexscreener_pair))
 
 CANDLE_SECONDS = 15
 MAX_CANDLES = 480  # ~2h of 15s candles kept in memory
@@ -80,11 +85,15 @@ class PaperFeed:
         self.book.update(chain, tok.symbol, tok.paper_start_price)
 
     def apply_impact(self, chain: str, token: str, bps: float) -> None:
-        """Trades in paper mode nudge the simulated price."""
+        """Trades in paper mode nudge the simulated price.
+
+        No-op when the token was never registered (e.g. live-priced in paper mode).
+        """
         key = (chain, token.upper())
-        if key in self._state:
-            self._state[key] *= 1 + bps / 10_000
-            self.book.update(chain, token, self._state[key])
+        if key not in self._state:
+            return
+        self._state[key] *= 1 + bps / 10_000
+        self.book.update(chain, token, self._state[key])
 
     async def run(self) -> None:
         while True:
