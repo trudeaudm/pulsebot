@@ -807,6 +807,42 @@ def test_pulse_ca_bundle_plumbs_to_httpx():
     assert "PULSE_CA_BUNDLE" in hint and "truststore" in hint
 
 
+def test_command_chain_inheritance():
+    from tradebot.commands import parse_command
+    from tradebot.server import apply_request_chain, format_command_echo
+
+    chains = {"base": object(), "robinhood": object()}
+
+    # body.chain applied when text has no explicit chain
+    spec = parse_command("buy $10 of TOKENA")
+    assert not spec.chain
+    assert apply_request_chain(spec, "robinhood", chains) is True
+    assert spec.chain == "robinhood"
+    echo = format_command_echo(spec, True)
+    assert "robinhood" in echo and "from chain selector" in echo
+
+    # explicit "on base" beats body.chain
+    spec2 = parse_command("buy $10 of TOKENA on base")
+    assert spec2.chain == "base"
+    assert apply_request_chain(spec2, "robinhood", chains) is False
+    assert spec2.chain == "base"
+    assert "from chain selector" not in format_command_echo(spec2, False)
+
+    # invalid body.chain falls back (leave empty → engine default_chain)
+    spec3 = parse_command("pause")
+    # pause has no chain field used; use a market-like empty chain
+    spec3 = parse_command("buy $10 of TOKENA")
+    assert apply_request_chain(spec3, "notachain", chains) is False
+    assert not spec3.chain
+
+    # watch echo includes selector note
+    w = parse_command("0x4ed4e862860bed51a9570b96d89af5e1b0efefed")
+    assert w.kind == "watch" and not w.chain
+    assert apply_request_chain(w, "robinhood", chains)
+    w.notes = ["watching DEGEN (Degen) on robinhood — $0.01, $1.0M liquidity on uniswap"]
+    assert format_command_echo(w, True).endswith("(from chain selector)")
+
+
 def test_encode_v3_path_and_plan_route():
     from tradebot.chains import encode_v3_path, plan_route
     from tradebot.config import ChainConfig, TokenConfig

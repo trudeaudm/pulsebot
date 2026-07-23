@@ -232,7 +232,9 @@ showing `paper`.
 
 Charcoal primary with a chain-keyed electric accent: **Base blue** (`#0052FF`)
 when the selected market is on Base, **Robinhood green** (`#00C805`) on
-Robinhood Chain. Switching chain tabs re-themes the shell (command bar, tabs,
+Robinhood Chain. The header chain chip toggles the active chain (theme +
+default for commands without `on …`); token tabs still switch to that token's
+chain. Switching chain tabs re-themes the shell (command bar, tabs,
 progress bars, equity curve); every strategy card carries its own chain's
 accent on the left edge regardless of the selected tab.
 

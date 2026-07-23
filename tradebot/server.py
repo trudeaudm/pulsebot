@@ -22,6 +22,34 @@ STATIC = Path(__file__).parent / "static"
 
 class CommandIn(BaseModel):
     text: str
+    chain: str | None = None  # optional active chain from the dashboard chip
+
+
+def apply_request_chain(spec, body_chain: str | None, chains: dict) -> bool:
+    """If the parse left chain empty, apply body.chain when it is a known key.
+
+    Returns True when the chain was inherited from the request body (chip).
+    Explicit "on <chain>" in the text always wins. Invalid body.chain is
+    ignored — the engine falls back to cfg.default_chain. Engine controls
+    (pause/resume/cancel) never inherit a chain.
+    """
+    if spec.kind in ("pause", "resume", "cancel"):
+        return False
+    if spec.chain:
+        return False
+    if body_chain and body_chain in chains:
+        spec.chain = body_chain
+        return True
+    return False
+
+
+def format_command_echo(spec, inherited: bool) -> str:
+    msg = spec.describe()
+    if not inherited or not spec.chain:
+        return msg
+    if f" on {spec.chain}" in msg or msg.endswith(f"on {spec.chain}"):
+        return f"{msg} (from chain selector)"
+    return f"{msg} on {spec.chain} (from chain selector)"
 
 
 def _wire_paper_feed(paper_feed: PaperFeed, cfg: BotConfig) -> None:
@@ -121,12 +149,15 @@ def build_app(config_path: str | None = None) -> FastAPI:
                     return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
             else:
                 return JSONResponse({"ok": False, "error": str(first_err)}, status_code=400)
+        inherited = apply_request_chain(spec, body.chain, cfg.chains)
         try:
             strat = engine.submit(spec)
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
-        return {"ok": True, "parsed": spec.describe(),
-                "id": strat.id if strat else None}
+        return {"ok": True, "parsed": format_command_echo(spec, inherited),
+                "id": strat.id if strat else None,
+                "chain": spec.chain or cfg.default_chain,
+                "chain_inherited": inherited}
 
     @app.post("/api/strategy/{sid}/cancel")
     async def cancel(sid: str):

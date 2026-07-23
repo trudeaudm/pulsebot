@@ -34,7 +34,9 @@ header{display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:
 .mode{font-family:var(--mono);font-size:11px;padding:3px 9px;border-radius:3px;border:1px solid var(--line);color:var(--dim);text-transform:uppercase;letter-spacing:.08em}
 .mode.live{border-color:var(--sell);color:var(--sell)}
 .mode.paused{border-color:var(--amber);color:var(--amber)}
-.chainchip{font-family:var(--mono);font-size:11px;padding:3px 9px;border-radius:3px;background:var(--accent-soft);color:var(--accent-text);text-transform:uppercase;letter-spacing:.08em;transition:background .3s,color .3s}
+.chainchip{font-family:var(--mono);font-size:11px;padding:3px 9px;border-radius:3px;background:var(--accent-soft);color:var(--accent-text);text-transform:uppercase;letter-spacing:.08em;transition:background .3s,color .3s,border-color .15s;border:1px solid transparent;cursor:pointer}
+.chainchip:hover{border-color:var(--accent-text);filter:brightness(1.08)}
+.chainchip .swap{opacity:.65;margin-left:4px;font-size:10px;letter-spacing:0}
 #clock{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--dim)}
 
 /* ---- signature: the command line ---- */
@@ -149,7 +151,7 @@ footer b{color:var(--amber)}
 <header>
   <div class="wordmark">Pulse<span>_</span></div>
   <div class="mode" id="mode">paper</div>
-  <div class="chainchip" id="chainchip">base</div>
+  <button type="button" class="chainchip" id="chainchip" title="Switch active chain">base <span class="swap">⇄</span></button>
   <div id="clock"></div>
 </header>
 
@@ -255,12 +257,27 @@ const CHAIN_THEME={
   robinhood:{accent:'#00C805',text:'#2BE55C',contrast:'#06220D',soft:'rgba(0,200,5,.14)',area:'rgba(0,200,5,.20)'},
 };
 const chainColor=c=>(CHAIN_THEME[c]||{accent:'#F5B841'}).accent;
+let activeChain='base';
 function applyTheme(chain){
-  const t=CHAIN_THEME[chain]||CHAIN_THEME.base;
-  document.documentElement.dataset.chain=chain in CHAIN_THEME?chain:'base';
-  $('#chainchip').textContent=chain;
+  if(chain) activeChain=chain;
+  const t=CHAIN_THEME[activeChain]||CHAIN_THEME.base;
+  document.documentElement.dataset.chain=activeChain in CHAIN_THEME?activeChain:'base';
+  $('#chainchip').innerHTML=`${activeChain} <span class="swap">⇄</span>`;
+  $('#chainchip').title=`Active chain: ${activeChain} — click to switch`;
   eqSeries.applyOptions({lineColor:t.text,topColor:t.area,bottomColor:'rgba(0,0,0,0)'});
 }
+function cycleChain(){
+  const keys=Object.keys(chainsMap||{});
+  if(!keys.length){
+    const fallback=Object.keys(CHAIN_THEME);
+    const i=fallback.indexOf(activeChain);
+    applyTheme(fallback[(i+1)%fallback.length]);
+    return;
+  }
+  const i=keys.indexOf(activeChain);
+  applyTheme(keys[(i+1+keys.length)%keys.length]);
+}
+$('#chainchip').onclick=cycleChain;
 let tokens=[], sel=null, tokenSig='';
 function updateChartEmpty(){
   const el=$('#chartempty');
@@ -348,7 +365,7 @@ async function send(){
   const text=$('#cmd').value.trim(); if(!text)return;
   primeNotifications();
   const echo=$('#echo'); echo.textContent='…'; echo.className='';
-  const r=await fetch('/api/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+  const r=await fetch('/api/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,chain:activeChain})});
   const j=await r.json();
   if(j.ok){
     echo.textContent='✓ parsed as: '+j.parsed;echo.className='ok';
@@ -427,7 +444,13 @@ function handleEvents(events){
 // ---------- state stream
 function statCell(k,v,cls=''){return `<div class="stat"><div class="k">${k}</div><div class="v ${cls}">${v}</div></div>`}
 function render(st){
-  if(st.chains) chainsMap=st.chains;
+  if(st.chains){
+    chainsMap=st.chains;
+    if(!(activeChain in chainsMap)){
+      const first=Object.keys(chainsMap)[0];
+      if(first) applyTheme(first);
+    }
+  }
   $('#mode').textContent=st.paused?'paused':st.mode;
   $('#mode').className='mode'+(st.mode==='live'?' live':'')+(st.paused?' paused':'');
   const sig=(st.tokens||[]).map(t=>`${t.chain}:${t.token}`).join('|');
