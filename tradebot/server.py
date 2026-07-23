@@ -81,7 +81,10 @@ async def _warn_missing_live_prices(engine: Engine, book: PriceBook,
 
 def build_app(config_path: str | None = None) -> FastAPI:
     cfg = load_config(config_path)
-    book = PriceBook()
+    store = Store(cfg.db_path)
+    book = PriceBook(
+        on_candle_close=lambda ch, tok, candle: store.save_candle(ch, tok, candle)
+    )
     portfolio = Portfolio(cash_usd=cfg.paper_cash_usd if cfg.mode == "paper" else 0.0)
 
     paper_feed = None
@@ -99,7 +102,6 @@ def build_app(config_path: str | None = None) -> FastAPI:
                 private_key=cfg.private_key,
                 v2_router=chain.v2_router, weth_token=chain.weth_token)
 
-    store = Store(cfg.db_path)
     engine = Engine(cfg, book, portfolio, paper_feed, live_clients, store=store)
     engine.restore()
     from .config import trust_store_warning

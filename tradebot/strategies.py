@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from .commands import StrategySpec
 from .config import BotConfig, TokenConfig
+from .history import fetch_ohlcv
 from .portfolio import Portfolio, Trade
 from .prices import PaperFeed, PriceBook
 from .registry import FetchFn, resolve
@@ -156,7 +157,8 @@ class Engine:
     def __init__(self, cfg: BotConfig, book: PriceBook, portfolio: Portfolio,
                  paper_feed: PaperFeed | None, live_clients: dict,
                  store: Store | None = None,
-                 registry_fetch: FetchFn | None = None) -> None:
+                 registry_fetch: FetchFn | None = None,
+                 history_fetch=None) -> None:
         self.cfg = cfg
         self.book = book
         self.portfolio = portfolio
@@ -164,6 +166,7 @@ class Engine:
         self.live_clients = live_clients   # chain_key -> ChainClient
         self.store = store
         self.registry_fetch = registry_fetch
+        self.history_fetch = history_fetch  # injectable GeckoTerminal fetch
         self.strategies: list[Strategy] = []
         self.paused = False
         self.events: list[dict] = []
@@ -176,6 +179,11 @@ class Engine:
         self.watched_keys: set[tuple[str, str]] = set()
         if store is not None:
             store.set_on_error(lambda msg: self.log(msg))
+            # wire candle persistence if the book wasn't given a callback yet
+            if book.on_candle_close is None:
+                book.on_candle_close = (
+                    lambda ch, tok, candle: store.save_candle(ch, tok, candle)
+                )
 
     def _persist_strategy(self, s: Strategy) -> None:
         if self.store:
@@ -269,6 +277,7 @@ class Engine:
     def _restore_watched(self) -> None:
         assert self.store is not None
         n = 0
+        to_backfill: list[tuple[str, TokenConfig]] = []
         for row in self.store.load_watched_tokens():
             chain_key = row["chain"]
             if chain_key not in self.cfg.chains:
@@ -284,9 +293,49 @@ class Engine:
             )
             self.cfg.chains[chain_key].tokens[sym] = tok
             self.watched_keys.add((chain_key, sym))
+            if tok.dexscreener_pair:
+                to_backfill.append((chain_key, tok))
             n += 1
         if n:
             self.log(f"restored {n} watched token(s)")
+        self._restore_candles()
+        # serialize GeckoTerminal fetches (~30 req/min free tier)
+        for i, (ck, tok) in enumerate(to_backfill):
+            if i:
+                time.sleep(2.1)
+            self._backfill_history(ck, tok)
+
+    def _restore_candles(self) -> None:
+        if not self.store:
+            return
+        rows = self.store.load_candles()
+        by_key: dict[tuple[str, str], list[dict]] = {}
+        for r in rows:
+            key = (r["chain"], r["token"])
+            by_key.setdefault(key, []).append({
+                "time": r["time"], "open": r["open"], "high": r["high"],
+                "low": r["low"], "close": r["close"],
+            })
+        for (chain, token), candles in by_key.items():
+            self.book.seed_history(chain, token, candles)
+
+    def _backfill_history(self, chain: str, tok: TokenConfig) -> None:
+        chain_cfg = self.cfg.chains.get(chain)
+        if not chain_cfg:
+            return
+        network = (chain_cfg.geckoterminal_network or "").strip()
+        pair = (tok.dexscreener_pair or "").strip()
+        if not network or not pair:
+            return
+        candles = fetch_ohlcv(network, pair, fetch=self.history_fetch)
+        if not candles:
+            self.log(
+                f"chart backfill failed for {tok.symbol} on {chain}",
+                level="warning",
+            )
+            return
+        self.book.seed_history(chain, tok.symbol, candles)
+        self.log(f"backfilled {len(candles)}m of {tok.symbol} history")
 
     # ------------------------------------------------------------- intake
 
@@ -396,6 +445,8 @@ class Engine:
         )
         chain_cfg.tokens[sym] = tok
         self.watched_keys.add((chain, sym))
+        # backfill chart history BEFORE the live price tick lands
+        self._backfill_history(chain, tok)
         if info["price_usd"] > 0:
             self.book.update(chain, sym, info["price_usd"])
         if self.store:
@@ -442,6 +493,7 @@ class Engine:
         self.watched_keys.discard((chain, sym))
         if self.store:
             self.store.delete_watched_token(chain, sym)
+            self.store.delete_candles(chain, sym)
         msg = f"unwatched {sym} on {chain}"
         self.log(msg)
         spec.notes = [msg]

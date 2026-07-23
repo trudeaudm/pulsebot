@@ -25,39 +25,70 @@ def has_live_price_source(tok: TokenConfig, chain: ChainConfig) -> bool:
     return bool(chain.dexscreener_slug and (tok.address or tok.dexscreener_pair))
 
 CANDLE_SECONDS = 15
-MAX_CANDLES = 480  # ~2h of 15s candles kept in memory
+MAX_CANDLES = 5000  # matches SQLite per-token cap (~20h of 15s bars)
 
 
 class Candles:
     def __init__(self) -> None:
         self.data: deque[dict] = deque(maxlen=MAX_CANDLES)
 
-    def push(self, ts: float, price: float) -> None:
+    def push(self, ts: float, price: float) -> dict | None:
+        """Update the open bucket. Returns a copy of the prior candle when it closes."""
         bucket = int(ts // CANDLE_SECONDS) * CANDLE_SECONDS
         if self.data and self.data[-1]["time"] == bucket:
             c = self.data[-1]
             c["high"] = max(c["high"], price)
             c["low"] = min(c["low"], price)
             c["close"] = price
-        else:
-            self.data.append({"time": bucket, "open": price, "high": price,
-                              "low": price, "close": price})
+            return None
+        closed = dict(self.data[-1]) if self.data else None
+        self.data.append({"time": bucket, "open": price, "high": price,
+                          "low": price, "close": price})
+        return closed
 
     def series(self) -> list[dict]:
         return list(self.data)
+
+    def replace(self, candles: list[dict]) -> None:
+        """Replace series with pre-built candles (backfill / DB restore)."""
+        self.data.clear()
+        for c in candles[-MAX_CANDLES:]:
+            self.data.append({
+                "time": int(c["time"]),
+                "open": float(c["open"]),
+                "high": float(c["high"]),
+                "low": float(c["low"]),
+                "close": float(c["close"]),
+            })
 
 
 class PriceBook:
     """Latest price + candle history per (chain, token)."""
 
-    def __init__(self) -> None:
+    def __init__(self, on_candle_close=None) -> None:
         self.last: dict[tuple[str, str], float] = {}
         self.candles: dict[tuple[str, str], Candles] = {}
+        self.on_candle_close = on_candle_close
 
     def update(self, chain: str, token: str, price: float) -> None:
         key = (chain, token.upper())
         self.last[key] = price
-        self.candles.setdefault(key, Candles()).push(time.time(), price)
+        closed = self.candles.setdefault(key, Candles()).push(time.time(), price)
+        if closed and self.on_candle_close:
+            try:
+                self.on_candle_close(chain, key[1], closed)
+            except Exception:
+                pass
+
+    def seed_history(self, chain: str, token: str, candles: list[dict]) -> None:
+        """Merge historical candles under any existing live series (ascending, no overlap)."""
+        from .history import merge_candles
+        key = (chain, token.upper())
+        cur = self.candles.setdefault(key, Candles())
+        merged = merge_candles(candles, list(cur.data))
+        cur.replace(merged)
+        if merged and key not in self.last:
+            self.last[key] = float(merged[-1]["close"])
 
     def price(self, chain: str, token: str) -> float | None:
         return self.last.get((chain, token.upper()))

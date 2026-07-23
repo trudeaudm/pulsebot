@@ -43,6 +43,8 @@ class ChainConfig:
     weth_usdc_fee: int = 500      # v3 fee tier for WETH<->USDC hop
     # Variable name if rpc_url was ${VAR}; never log the URL (may embed API keys).
     rpc_env_var: str = ""
+    # GeckoTerminal network slug for OHLCV backfill; blank = skip backfill.
+    geckoterminal_network: str = ""
     tokens: dict[str, TokenConfig] = field(default_factory=dict)
 
 
@@ -211,6 +213,10 @@ def load_config(path: str | None = None, *, dotenv_path: str | Path | None = Non
             v2_router=c.get("v2_router", "") or "",
             weth_usdc_fee=int(c.get("weth_usdc_fee", 500) or 500),
             rpc_env_var=rpc_var,
+            geckoterminal_network=str(
+                c["geckoterminal_network"] if "geckoterminal_network" in c
+                else (c.get("dexscreener_slug") or "")
+            ),
             tokens=tokens,
         )
 

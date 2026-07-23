@@ -187,10 +187,22 @@ per-hop budget.
 
 ## Persistence
 
-Trades, strategies, equity samples, and portfolio meta are write-through
-persisted to SQLite (`bot.db_path`, default `pulse.db`, already gitignored).
-Restarting the process restores cash/positions (by replaying the trade ledger),
-equity history, and every strategy with its original ID (`S1`, `S2`, …).
+Trades, strategies, equity samples, watched tokens, candle history, and
+portfolio meta are write-through persisted to SQLite (`bot.db_path`, default
+`pulse.db`, already gitignored). Restarting the process restores cash/positions
+(by replaying the trade ledger), equity history, closed candles into the chart
+PriceBook, and every strategy with its original ID (`S1`, `S2`, …).
+
+### Chart history
+
+When a token is watched (and on boot for restored watched tokens that have a
+pair address), Pulse backfills ~180 minutes of 1m OHLCV from GeckoTerminal
+**before** live ticks append. Mixed resolution (1m history + 15s live) is fine
+— the chart only needs ascending times. Configure `geckoterminal_network` per
+chain (`base` on Base; leave blank on Robinhood to skip). Live candle closes
+are write-behind to the `candles` table (capped ~5000 rows/token). Backfill
+failures log a warning and never interrupt trading; requests are spaced to
+respect GeckoTerminal's free-tier rate limit.
 
 On resume, `accrued_usd` is reset to 0 and `last_tick` is set to now so downtime
 never causes a burst of catch-up child orders. In **paper** mode active strategies
@@ -268,6 +280,7 @@ tradebot/
   commands.py    NL parser (regex grammar + optional Claude fallback)
   strategies.py  strategy state machines + engine loop + executors
   prices.py      paper simulator, Dexscreener poller, candle store
+  history.py     GeckoTerminal OHLCV backfill for charts
   chains.py      web3 adapter: ERC-20, QuoterV2, exactInputSingle swaps
   portfolio.py   balances, cost basis, realized/unrealized PnL, stats
   store.py       SQLite write-through persistence + restart resume

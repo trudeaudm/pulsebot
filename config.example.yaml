@@ -29,6 +29,7 @@ chains:
     rpc_url: ${PULSE_BASE_RPC}
     explorer: https://basescan.org
     dexscreener_slug: base                     # enables live price feed even in paper mode if you set addresses
+    geckoterminal_network: base                # OHLCV backfill for charts; blank = skip
     # Uniswap v3 on Base:
     router: "0x2626664c2603336E57B271c5C0b26F421741e481"   # SwapRouter02
     quoter: "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"   # QuoterV2
@@ -51,6 +52,7 @@ chains:
     rpc_url: ${PULSE_ROBINHOOD_RPC}
     explorer: https://robinhoodchain.blockscout.com
     dexscreener_slug: ""        # set when Dexscreener indexes your pair's chain slug
+    geckoterminal_network: ""   # blank = chart backfill silently skipped
     # Fill these with the router/quoter of the DEX you trade on Robinhood Chain
     # (it's Arbitrum Nitro / fully EVM-compatible, so v3-style routers work as-is):
     router: ""

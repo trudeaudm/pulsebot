@@ -74,7 +74,19 @@ CREATE TABLE IF NOT EXISTS watched_tokens (
     decimals INTEGER NOT NULL DEFAULT 18,
     PRIMARY KEY (chain, symbol)
 );
+CREATE TABLE IF NOT EXISTS candles (
+    chain TEXT NOT NULL,
+    token TEXT NOT NULL,
+    time INTEGER NOT NULL,
+    o REAL NOT NULL,
+    h REAL NOT NULL,
+    l REAL NOT NULL,
+    c REAL NOT NULL,
+    PRIMARY KEY (chain, token, time)
+);
 """
+
+CANDLE_HISTORY_CAP = 5000
 
 
 def spec_to_json(spec: StrategySpec) -> str:
@@ -147,6 +159,12 @@ class Store:
             "chain TEXT NOT NULL, symbol TEXT NOT NULL, address TEXT NOT NULL, "
             "pair TEXT NOT NULL DEFAULT '', decimals INTEGER NOT NULL DEFAULT 18, "
             "PRIMARY KEY (chain, symbol))"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS candles ("
+            "chain TEXT NOT NULL, token TEXT NOT NULL, time INTEGER NOT NULL, "
+            "o REAL NOT NULL, h REAL NOT NULL, l REAL NOT NULL, c REAL NOT NULL, "
+            "PRIMARY KEY (chain, token, time))"
         )
 
     def close(self) -> None:
@@ -370,3 +388,79 @@ class Store:
         except Exception as e:
             self._err(e)
             return []
+
+    # ------------------------------------------------------------- candles
+
+    def save_candle(self, chain: str, token: str, candle: dict) -> None:
+        """Write-behind one closed candle; prune oldest beyond CANDLE_HISTORY_CAP."""
+        def go() -> None:
+            self._conn.execute(
+                "INSERT INTO candles(chain, token, time, o, h, l, c) VALUES(?,?,?,?,?,?,?) "
+                "ON CONFLICT(chain, token, time) DO UPDATE SET "
+                "o=excluded.o, h=excluded.h, l=excluded.l, c=excluded.c",
+                (chain, token.upper(), int(candle["time"]),
+                 float(candle["open"]), float(candle["high"]),
+                 float(candle["low"]), float(candle["close"])),
+            )
+            self._conn.execute(
+                "DELETE FROM candles WHERE chain=? AND token=? AND time IN ("
+                "  SELECT time FROM candles WHERE chain=? AND token=? "
+                "  ORDER BY time DESC LIMIT -1 OFFSET ?"
+                ")",
+                (chain, token.upper(), chain, token.upper(), CANDLE_HISTORY_CAP),
+            )
+            self._conn.commit()
+        self._safe(go)
+
+    def load_candles(self, chain: str | None = None,
+                     token: str | None = None) -> list[dict]:
+        try:
+            if chain and token:
+                rows = self._conn.execute(
+                    "SELECT chain, token, time, o, h, l, c FROM candles "
+                    "WHERE chain=? AND token=? ORDER BY time",
+                    (chain, token.upper()),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT chain, token, time, o, h, l, c FROM candles "
+                    "ORDER BY chain, token, time"
+                ).fetchall()
+            return [
+                {"chain": r["chain"], "token": r["token"], "time": int(r["time"]),
+                 "open": float(r["o"]), "high": float(r["h"]),
+                 "low": float(r["l"]), "close": float(r["c"])}
+                for r in rows
+            ]
+        except Exception as e:
+            self._err(e)
+            return []
+
+    def delete_candles(self, chain: str, token: str) -> None:
+        def go() -> None:
+            self._conn.execute(
+                "DELETE FROM candles WHERE chain=? AND token=?",
+                (chain, token.upper()),
+            )
+            self._conn.commit()
+        self._safe(go)
+
+    def prune_candles(self, chain: str, token: str,
+                      keep: int = CANDLE_HISTORY_CAP) -> int:
+        """Drop oldest rows beyond ``keep``. Returns rows deleted (best-effort)."""
+        deleted = 0
+
+        def go() -> None:
+            nonlocal deleted
+            cur = self._conn.execute(
+                "DELETE FROM candles WHERE chain=? AND token=? AND time IN ("
+                "  SELECT time FROM candles WHERE chain=? AND token=? "
+                "  ORDER BY time DESC LIMIT -1 OFFSET ?"
+                ")",
+                (chain, token.upper(), chain, token.upper(), keep),
+            )
+            deleted = cur.rowcount if cur.rowcount is not None else 0
+            self._conn.commit()
+
+        self._safe(go)
+        return deleted

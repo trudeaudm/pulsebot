@@ -984,6 +984,8 @@ def test_pool_route_config_defaults():
     ex = load_config("config.example.yaml", dotenv_path=root / "none")
     assert ex.chains["base"].tokens == {}
     assert ex.chains["robinhood"].tokens == {}
+    assert ex.chains["base"].geckoterminal_network == "base"
+    assert ex.chains["robinhood"].geckoterminal_network == ""
     assert ex.chains["base"].weth_usdc_fee == 500
     assert ex.chains["base"].weth_token == ""  # commented in example
 
@@ -1222,6 +1224,102 @@ def test_apply_impact_unregistered_noop():
     before = book.price("base", "TOKENA")
     feed.apply_impact("base", "TOKENA", 100)  # +1%
     assert abs(book.price("base", "TOKENA") - before * 1.01) < 1e-12
+
+
+def test_geckoterminal_ohlcv_parse_and_merge():
+    from tradebot.history import fetch_ohlcv, merge_candles, parse_ohlcv
+
+    payload = {
+        "data": {
+            "id": "x",
+            "type": "ohlcv_request_response",
+            "attributes": {
+                "ohlcv_list": [
+                    [1_700_000_120, 2.0, 2.5, 1.5, 2.2, 100.0],
+                    [1_700_000_000, 1.0, 1.2, 0.9, 1.1, 50.0],
+                    [1_700_000_060, 1.1, 1.4, 1.0, 1.3, 75.0],
+                ]
+            },
+        }
+    }
+    candles = parse_ohlcv(payload)
+    assert [c["time"] for c in candles] == [1_700_000_000, 1_700_000_060, 1_700_000_120]
+    assert candles[0]["open"] == 1.0 and candles[0]["close"] == 1.1
+    assert parse_ohlcv({}) == [] and parse_ohlcv({"data": {}}) == []
+
+    fetched = fetch_ohlcv("base", "0xpool", fetch=lambda url: payload)
+    assert len(fetched) == 3
+    assert fetch_ohlcv("", "0xpool", fetch=lambda url: payload) == []
+    assert fetch_ohlcv("base", "", fetch=lambda url: payload) == []
+    assert fetch_ohlcv("base", "0xpool", fetch=lambda url: (_ for _ in ()).throw(RuntimeError())) == []
+
+    live = [{"time": 1_700_000_100, "open": 9, "high": 9, "low": 9, "close": 9},
+            {"time": 1_700_000_115, "open": 8, "high": 8, "low": 8, "close": 8}]
+    merged = merge_candles(candles, live)
+    times = [c["time"] for c in merged]
+    assert times == [1_700_000_000, 1_700_000_060, 1_700_000_100, 1_700_000_115]
+    # backfill at/after first live dropped
+    assert 1_700_000_120 not in times
+    book = PriceBook()
+    book.seed_history("base", "DEGEN", candles)
+    book.seed_history("base", "DEGEN", [])  # no-op merge
+    # append a live tick newer than backfill
+    import tradebot.prices as prices_mod
+    old = prices_mod.time.time
+    prices_mod.time.time = lambda: 1_700_000_200.0
+    try:
+        book.update("base", "DEGEN", 3.0)
+    finally:
+        prices_mod.time.time = old
+    hist = book.history("base", "DEGEN")
+    assert hist[0]["time"] < hist[-1]["time"]
+    assert hist[-1]["close"] == 3.0
+
+
+def test_candle_store_roundtrip_and_prune():
+    import tempfile
+    from tradebot.store import CANDLE_HISTORY_CAP, Store
+
+    root = Path(tempfile.mkdtemp())
+    store = Store(root / "c.db")
+    closed = []
+
+    def on_close(ch, tok, candle):
+        closed.append(candle)
+        store.save_candle(ch, tok, candle)
+
+    book = PriceBook(on_candle_close=on_close)
+    import tradebot.prices as prices_mod
+    t0 = 1_800_000_000
+    old = prices_mod.time.time
+    try:
+        prices_mod.time.time = lambda: float(t0)
+        book.update("base", "DEGEN", 1.0)
+        prices_mod.time.time = lambda: float(t0 + 20)  # new 15s bucket → close prior
+        book.update("base", "DEGEN", 1.5)
+    finally:
+        prices_mod.time.time = old
+    assert closed and closed[0]["close"] == 1.0
+
+    rows = store.load_candles("base", "DEGEN")
+    assert len(rows) == 1 and rows[0]["close"] == 1.0
+
+    # prune: insert many then cap
+    for i in range(10):
+        store.save_candle("base", "TOK", {
+            "time": 1000 + i, "open": 1, "high": 1, "low": 1, "close": 1,
+        })
+    store.prune_candles("base", "TOK", keep=3)
+    left = store.load_candles("base", "TOK")
+    assert len(left) == 3
+    assert [r["time"] for r in left] == [1007, 1008, 1009]
+
+    # save_candle also prunes via OFFSET cap
+    for i in range(CANDLE_HISTORY_CAP + 5):
+        store.save_candle("base", "BIG", {
+            "time": 2000 + i, "open": 1, "high": 1, "low": 1, "close": 1,
+        })
+    assert len(store.load_candles("base", "BIG")) == CANDLE_HISTORY_CAP
 
 
 if __name__ == "__main__":
