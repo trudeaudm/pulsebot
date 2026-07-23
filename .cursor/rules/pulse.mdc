@@ -68,8 +68,11 @@ single-file vanilla-JS dashboard. No build step anywhere.
 1. `python3 tests/test_pulse.py` passes (add tests for new engine behavior).
 2. If `static/index.html` changed: extract the last <script> block and run
    `node --check` on it.
-3. Boot check: `python3 -m tradebot config.example.yaml` starts in paper mode
-   with zero warnings, dashboard loads, a command round-trips.
+3. Boot check: start `python3 -m tradebot config.example.yaml`, verify the
+   dashboard responds (and a command round-trips), then **terminate that
+   process before finishing**. Never leave a Pulse instance running after
+   verification — strays steal the port and share `pulse.db` with the
+   user's real session.
 4. README updated if the command grammar, config schema, or API changed.
 
 ## Safety posture

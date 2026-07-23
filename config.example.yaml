@@ -14,7 +14,7 @@ bot:
   host: 127.0.0.1
   port: 8420
   private_key_env: PULSE_PRIVATE_KEY   # env var holding your key in live mode. Never paste keys here.
-  db_path: pulse.db                    # SQLite file for trades / strategies / equity (gitignored)
+  db_path: pulse.db                    # SQLite ledger (gitignored). Two instances must NEVER share one database file.
   risk:
     max_open_notional_usd_per_token: 0   # block buys that would push position value above this (0 = off)
     max_daily_spend_usd: 0               # trailing 24h notional across all fills (0 = off)

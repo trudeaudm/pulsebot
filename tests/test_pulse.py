@@ -735,6 +735,41 @@ def test_dotenv_and_rpc_interpolation():
     assert paper.chains["base"].rpc_env_var == "PULSE_BASE_RPC"
 
 
+def test_cli_parse_port_and_config():
+    from tradebot.__main__ import (
+        _is_addr_in_use, _port_busy_message, parse_cli, resolve_config_path,
+    )
+
+    ns = parse_cli([])
+    assert resolve_config_path(ns) is None and ns.port is None and not ns.reset
+
+    ns = parse_cli(["config.yaml"])
+    assert resolve_config_path(ns) == "config.yaml"
+
+    ns = parse_cli(["--config", "mine.yaml", "--port", "9001"])
+    assert resolve_config_path(ns) == "mine.yaml" and ns.port == 9001
+
+    # --config overrides positional
+    ns = parse_cli(["ignored.yaml", "--config", "explicit.yaml", "--port", "8421"])
+    assert resolve_config_path(ns) == "explicit.yaml" and ns.port == 8421
+
+    ns = parse_cli(["--reset", "config.example.yaml"])
+    assert ns.reset and resolve_config_path(ns) == "config.example.yaml"
+
+    msg = _port_busy_message(8420)
+    assert "port 8420 already in use" in msg
+    assert "--port 8421" in msg
+
+    e = OSError()
+    e.winerror = 10048
+    assert _is_addr_in_use(e)
+    import errno
+    e2 = OSError()
+    e2.errno = errno.EADDRINUSE
+    assert _is_addr_in_use(e2)
+    assert not _is_addr_in_use(ValueError("nope"))
+
+
 def test_encode_v3_path_and_plan_route():
     from tradebot.chains import encode_v3_path, plan_route
     from tradebot.config import ChainConfig, TokenConfig
