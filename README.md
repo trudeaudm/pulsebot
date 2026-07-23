@@ -159,7 +159,8 @@ Per token in config:
 - **weth** — two hops `USDC ↔ WETH ↔ token`. Set chain `weth_token` (and for
   v2, `v2_router`). On Base, example addresses are commented in
   `config.example.yaml`. DEGEN-style tokens that only have a WETH pair need
-  `route: weth`. For v3, `pool_fee` is the token↔WETH tier;
+  `route: weth` — on Dexscreener, check the pair's quote token; if it's WETH
+  (not USDC), use `route: weth`. For v3, `pool_fee` is the token↔WETH tier;
   `weth_usdc_fee` (default `500`) is the WETH↔USDC tier.
 
 End-to-end slippage still uses the reference price (`usd / ref_price` with

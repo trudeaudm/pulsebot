@@ -376,7 +376,7 @@ class ChainClient:
         token_in, token_out = path_cs[0], path_cs[-1]
         self._ensure_allowance(token_in, amount_in_raw, self.v2_router_addr)
         if deadline is None:
-            deadline = int(time.time()) + 600
+            deadline = int(time.time()) + 60
         fn = self.v2_router.functions.swapExactTokensForTokens(
             amount_in_raw, min_out_raw, path_cs, self.account.address, deadline)
         tx = fn.build_transaction(self._tx_fields())

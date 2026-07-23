@@ -742,17 +742,16 @@ def test_encode_v3_path_and_plan_route():
     usdc = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
     weth = "0x4200000000000000000000000000000000000006"
     tok = "0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed"
-    # Known packing: addr20 + fee3 + addr20 + fee3 + addr20
+    # Hand-computed 2-hop path hex: addr|fee500|addr|fee3000|addr
     packed = encode_v3_path([usdc, weth, tok], [500, 3000])
-    expected = (
-        bytes.fromhex(usdc[2:])
-        + (500).to_bytes(3, "big")
-        + bytes.fromhex(weth[2:])
-        + (3000).to_bytes(3, "big")
-        + bytes.fromhex(tok[2:])
+    expected_hex = (
+        "833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        "0001f4"
+        "4200000000000000000000000000000000000006"
+        "000bb8"
+        "4ed4e862860bed51a9570b96d89af5e1b0efefed"
     )
-    assert packed == expected
-    assert packed.hex() == expected.hex()
+    assert packed.hex() == expected_hex
 
     chain = ChainConfig(
         name="Base", chain_id=8453, rpc_url="",
@@ -780,6 +779,13 @@ def test_encode_v3_path_and_plan_route():
     assert buy_v2.pool_type == "v2" and buy_v2.path == [usdc, weth, tok]
     sell_v2 = plan_route("sell", v2_weth, chain)
     assert sell_v2.path == [tok, weth, usdc]
+
+    bare = ChainConfig(name="Base", chain_id=8453, rpc_url="", quote_token=usdc)
+    try:
+        plan_route("buy", weth_tok, bare)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "weth_token" in str(e)
 
 
 def test_decode_transfer_ignores_intermediate_weth_hop():
