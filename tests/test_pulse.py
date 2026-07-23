@@ -735,6 +735,117 @@ def test_dotenv_and_rpc_interpolation():
     assert paper.chains["base"].rpc_env_var == "PULSE_BASE_RPC"
 
 
+def test_encode_v3_path_and_plan_route():
+    from tradebot.chains import encode_v3_path, plan_route
+    from tradebot.config import ChainConfig, TokenConfig
+
+    usdc = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+    weth = "0x4200000000000000000000000000000000000006"
+    tok = "0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed"
+    # Known packing: addr20 + fee3 + addr20 + fee3 + addr20
+    packed = encode_v3_path([usdc, weth, tok], [500, 3000])
+    expected = (
+        bytes.fromhex(usdc[2:])
+        + (500).to_bytes(3, "big")
+        + bytes.fromhex(weth[2:])
+        + (3000).to_bytes(3, "big")
+        + bytes.fromhex(tok[2:])
+    )
+    assert packed == expected
+    assert packed.hex() == expected.hex()
+
+    chain = ChainConfig(
+        name="Base", chain_id=8453, rpc_url="",
+        quote_token=usdc, weth_token=weth, v2_router="0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24",
+        weth_usdc_fee=500,
+    )
+    direct = TokenConfig(symbol="T", address=tok, pool_fee=3000,
+                         pool_type="v3", route="direct")
+    weth_tok = TokenConfig(symbol="D", address=tok, pool_fee=3000,
+                           pool_type="v3", route="weth")
+    v2_weth = TokenConfig(symbol="D2", address=tok, pool_fee=3000,
+                          pool_type="v2", route="weth")
+
+    buy_d = plan_route("buy", direct, chain)
+    assert buy_d.path == [usdc, tok] and buy_d.fees == [3000] and buy_d.pool_type == "v3"
+    sell_d = plan_route("sell", direct, chain)
+    assert sell_d.path == [tok, usdc] and sell_d.fees == [3000]
+
+    buy_w = plan_route("buy", weth_tok, chain)
+    assert buy_w.path == [usdc, weth, tok] and buy_w.fees == [500, 3000]
+    sell_w = plan_route("sell", weth_tok, chain)
+    assert sell_w.path == [tok, weth, usdc] and sell_w.fees == [3000, 500]
+
+    buy_v2 = plan_route("buy", v2_weth, chain)
+    assert buy_v2.pool_type == "v2" and buy_v2.path == [usdc, weth, tok]
+    sell_v2 = plan_route("sell", v2_weth, chain)
+    assert sell_v2.path == [tok, weth, usdc]
+
+
+def test_decode_transfer_ignores_intermediate_weth_hop():
+    """Multi-hop receipt: WETH transfer + final token transfer — count only token."""
+    from tradebot.chains import TRANSFER_TOPIC0, decode_transfer_amount
+
+    recipient = "0x1111111111111111111111111111111111111111"
+    weth = "0x4200000000000000000000000000000000000006"
+    token = "0x4ed4e862860bed51a9570b96d89af5e1b0efefed"
+    other = "0x2222222222222222222222222222222222222222"
+
+    def transfer_log(token_addr: str, to_addr: str, amount: int) -> dict:
+        to_topic = "0x" + ("0" * 24) + to_addr[2:].lower()
+        return {
+            "address": token_addr,
+            "topics": [TRANSFER_TOPIC0,
+                       "0x" + "0" * 64,  # from (ignored)
+                       to_topic],
+            "data": hex(amount),
+        }
+
+    logs = [
+        transfer_log(weth, recipient, 10**18),          # intermediate hop
+        transfer_log(token, recipient, 123456789),      # final out
+        transfer_log(token, other, 999),                # wrong recipient
+    ]
+    got = decode_transfer_amount(logs, token, recipient)
+    assert got == 123456789
+    assert decode_transfer_amount(logs, weth, recipient) == 10**18
+
+
+def test_pool_route_config_defaults():
+    import tempfile
+    from tradebot.config import load_config
+
+    root = Path(tempfile.mkdtemp())
+    p = root / "c.yaml"
+    p.write_text(
+        "bot:\n  mode: paper\n"
+        "chains:\n  base:\n    name: Base\n    chain_id: 8453\n"
+        "    rpc_url: ''\n"
+        "    quote_token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'\n"
+        "    tokens:\n"
+        "      - symbol: PLAIN\n        address: '0xabc'\n"
+        "      - symbol: DEGEN\n        address: '0xdef'\n"
+        "        pool_type: v2\n        route: weth\n        pool_fee: 10000\n"
+        "    weth_token: '0x4200000000000000000000000000000000000006'\n"
+        "    v2_router: '0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24'\n"
+        "    weth_usdc_fee: 500\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(str(p), dotenv_path=root / "none")
+    plain = cfg.chains["base"].tokens["PLAIN"]
+    assert plain.pool_type == "v3" and plain.route == "direct"
+    degen = cfg.chains["base"].tokens["DEGEN"]
+    assert degen.pool_type == "v2" and degen.route == "weth" and degen.pool_fee == 10000
+    assert cfg.chains["base"].weth_usdc_fee == 500
+    assert cfg.chains["base"].weth_token.lower().startswith("0x4200")
+    # example config defaults
+    ex = load_config("config.example.yaml", dotenv_path=root / "none")
+    ta = ex.chains["base"].tokens["TOKENA"]
+    assert ta.pool_type == "v3" and ta.route == "direct"
+    assert ex.chains["base"].weth_usdc_fee == 500
+    assert ex.chains["base"].weth_token == ""  # commented in example
+
+
 # ----- watch any CA -------------------------------------------------------
 
 _WATCH_ADDR = "0x4ed4e862860bed51a9570b96d89af5e1b0efefed"

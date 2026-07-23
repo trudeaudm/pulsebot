@@ -68,7 +68,8 @@ def build_app(config_path: str | None = None) -> FastAPI:
                 name=chain.name, rpc_url=chain.rpc_url, chain_id=chain.chain_id,
                 router=chain.router, quoter=chain.quoter,
                 quote_token=chain.quote_token, quote_decimals=chain.quote_decimals,
-                private_key=cfg.private_key)
+                private_key=cfg.private_key,
+                v2_router=chain.v2_router, weth_token=chain.weth_token)
 
     store = Store(cfg.db_path)
     engine = Engine(cfg, book, portfolio, paper_feed, live_clients, store=store)

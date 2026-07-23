@@ -18,7 +18,9 @@ class TokenConfig:
     symbol: str
     address: str = ""
     decimals: int = 18
-    pool_fee: int = 3000          # Uniswap v3 fee tier for the token/quote pool
+    pool_fee: int = 3000          # Uniswap v3 fee tier (token<->USDC or token<->WETH)
+    pool_type: str = "v3"         # "v3" | "v2"
+    route: str = "direct"         # "direct" | "weth" (token<->WETH<->USDC)
     dexscreener_pair: str = ""    # optional pair address for price feed
     paper_start_price: float = 0.12
     paper_volatility: float = 0.004  # per-tick lognormal sigma for the simulator
@@ -36,6 +38,9 @@ class ChainConfig:
     quote_symbol: str = "USDC"
     quote_decimals: int = 6
     dexscreener_slug: str = ""    # dexscreener chain slug, e.g. "base"
+    weth_token: str = ""          # wrapped native for multi-hop routes
+    v2_router: str = ""           # Uniswap v2-style router
+    weth_usdc_fee: int = 500      # v3 fee tier for WETH<->USDC hop
     # Variable name if rpc_url was ${VAR}; never log the URL (may embed API keys).
     rpc_env_var: str = ""
     tokens: dict[str, TokenConfig] = field(default_factory=dict)
@@ -154,18 +159,28 @@ def load_config(path: str | None = None, *, dotenv_path: str | Path | None = Non
 
     chains: dict[str, ChainConfig] = {}
     for key, c in (raw.get("chains") or {}).items():
-        tokens = {
-            t["symbol"].upper(): TokenConfig(
-                symbol=t["symbol"].upper(),
+        tokens = {}
+        for t in (c.get("tokens") or []):
+            pool_type = str(t.get("pool_type") or "v3").lower()
+            route = str(t.get("route") or "direct").lower()
+            if pool_type not in ("v2", "v3"):
+                raise ValueError(
+                    f"token {t.get('symbol')}: pool_type must be 'v2' or 'v3'")
+            if route not in ("direct", "weth"):
+                raise ValueError(
+                    f"token {t.get('symbol')}: route must be 'direct' or 'weth'")
+            sym = t["symbol"].upper()
+            tokens[sym] = TokenConfig(
+                symbol=sym,
                 address=t.get("address", ""),
                 decimals=int(t.get("decimals", 18)),
                 pool_fee=int(t.get("pool_fee", 3000)),
+                pool_type=pool_type,
+                route=route,
                 dexscreener_pair=t.get("dexscreener_pair", ""),
                 paper_start_price=float(t.get("paper_start_price", 0.12)),
                 paper_volatility=float(t.get("paper_volatility", 0.004)),
             )
-            for t in (c.get("tokens") or [])
-        }
         rpc_raw = c.get("rpc_url", "") or ""
         rpc_var = _rpc_env_var_name(rpc_raw)
         rpc_url = _expand_env(rpc_raw, mode=mode, required_in_live=True)
@@ -180,6 +195,9 @@ def load_config(path: str | None = None, *, dotenv_path: str | Path | None = Non
             quote_symbol=c.get("quote_symbol", "USDC"),
             quote_decimals=int(c.get("quote_decimals", 6)),
             dexscreener_slug=c.get("dexscreener_slug", ""),
+            weth_token=c.get("weth_token", "") or "",
+            v2_router=c.get("v2_router", "") or "",
+            weth_usdc_fee=int(c.get("weth_usdc_fee", 500) or 500),
             rpc_env_var=rpc_var,
             tokens=tokens,
         )

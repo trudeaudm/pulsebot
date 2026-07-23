@@ -31,7 +31,10 @@ Each item should land with tests and a README update per `.cursor/rules/pulse.md
 12. **Mobile pass** — cards and detail overlay audited below 420px.
 13. **Watch any CA** (done) — paste a contract address; Dexscreener discovery
     adds a live-priced tab without editing config.
-14. **Live execution: Uniswap v2 pools + multi-hop routing via WETH** —
+14. **Live execution: Uniswap v2 pools + multi-hop routing via WETH** (done) —
     `pool_type` per token (`v2` | `v3`); path `token→WETH→USDC` when no
     direct USDC pool.
 15. **Live execution: Uniswap v4 pools** — Universal Router + Permit2.
+16. **Fast execution pipeline** — non-blocking sends with in-flight
+    accounting, local nonce manager, cached gas params, startup
+    preapprovals (primarily fast, then cheap).

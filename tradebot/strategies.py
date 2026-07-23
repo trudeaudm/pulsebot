@@ -791,6 +791,8 @@ class Engine:
                      ref_price=ref_price, strategy_id=s.id, mode="paper")
 
     def _execute_live(self, s: Strategy, usd: float, ref_price: float) -> Trade:
+        from .chains import plan_route
+
         spec = s.spec
         client = self.live_clients.get(s.chain)
         chain_cfg = self.cfg.chains[s.chain]
@@ -799,26 +801,36 @@ class Engine:
             raise RuntimeError("live mode not configured: set the private key env "
                                "var and router/quote_token addresses in config.yaml")
         slip = self.cfg.max_slippage_bps / 10_000
+        plan = plan_route(spec.side, tok, chain_cfg)
         if spec.side == "buy":
             amount_in_raw = int(usd * 10 ** chain_cfg.quote_decimals)
             expected_out = usd / ref_price
             min_out_raw = int(expected_out * (1 - slip) * 10 ** tok.decimals)
-            res = client.swap(chain_cfg.quote_token, tok.address, amount_in_raw,
-                              tok.pool_fee, min_out_raw,
-                              out_decimals=tok.decimals,
-                              in_decimals=chain_cfg.quote_decimals,
-                              quoted_out=expected_out)
-            qty, px = res.amount_out, usd / res.amount_out
+            in_dec, out_dec = chain_cfg.quote_decimals, tok.decimals
         else:
             qty = usd / ref_price
             amount_in_raw = int(qty * 10 ** tok.decimals)
             expected_out = usd
             min_out_raw = int(usd * (1 - slip) * 10 ** chain_cfg.quote_decimals)
-            res = client.swap(tok.address, chain_cfg.quote_token, amount_in_raw,
-                              tok.pool_fee, min_out_raw,
-                              out_decimals=chain_cfg.quote_decimals,
-                              in_decimals=tok.decimals,
-                              quoted_out=expected_out)
+            in_dec, out_dec = tok.decimals, chain_cfg.quote_decimals
+
+        if plan.pool_type == "v2":
+            res = client.swap_v2(
+                plan.path, amount_in_raw, min_out_raw,
+                in_decimals=in_dec, out_decimals=out_dec, quoted_out=expected_out)
+        elif len(plan.path) == 2:
+            res = client.swap(
+                plan.path[0], plan.path[1], amount_in_raw, plan.fees[0], min_out_raw,
+                out_decimals=out_dec, in_decimals=in_dec, quoted_out=expected_out)
+        else:
+            res = client.swap_v3_path(
+                plan.path, plan.fees, amount_in_raw, min_out_raw,
+                in_decimals=in_dec, out_decimals=out_dec, quoted_out=expected_out)
+
+        if spec.side == "buy":
+            qty, px = res.amount_out, usd / res.amount_out
+        else:
+            qty = usd / ref_price
             px = res.amount_out / qty if qty else ref_price
             usd = res.amount_out
         return Trade(ts=time.time(), chain=s.chain, token=spec.token,

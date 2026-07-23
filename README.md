@@ -140,6 +140,27 @@ falls back to `amountOutMinimum` and the price is shown with a `~` prefix.
 `max_slippage_bps` caps how far a live fill may deviate from the reference
 price; swaps revert instead of filling worse.
 
+### Pool types & routing
+
+Per token in config:
+
+| Field | Values | Meaning |
+|---|---|---|
+| `pool_type` | `v3` (default) / `v2` | Which router style to call |
+| `route` | `direct` (default) / `weth` | Hop path vs USDC |
+
+- **direct** — single hop `USDC ↔ token` (v3 `exactInputSingle` or v2
+  `swapExactTokensForTokens`).
+- **weth** — two hops `USDC ↔ WETH ↔ token`. Set chain `weth_token` (and for
+  v2, `v2_router`). On Base, example addresses are commented in
+  `config.example.yaml`. DEGEN-style tokens that only have a WETH pair need
+  `route: weth`. For v3, `pool_fee` is the token↔WETH tier;
+  `weth_usdc_fee` (default `500`) is the WETH↔USDC tier.
+
+End-to-end slippage still uses the reference price (`usd / ref_price` with
+`max_slippage_bps`) — the route is an implementation detail, not a looser
+per-hop budget.
+
 ## Persistence
 
 Trades, strategies, equity samples, and portfolio meta are write-through
